@@ -90,6 +90,9 @@
   loadCameras();
   setInterval(loadCameras, 15000);
 
+  // Record visit for admin stats (cookie-based unique visitors)
+  fetch('/api/visit', { credentials: 'include' }).catch(function () {});
+
   function connectWs() {
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(protocol + '//' + location.host + '/ws');
@@ -108,12 +111,55 @@
     ws.onclose = () => setTimeout(connectWs, 3000);
   }
 
+  // Palette of friendly colors for chat nicknames
+  const NICK_COLORS = [
+    '#e74c3c','#e67e22','#f1c40f','#2ecc71','#1abc9c',
+    '#3498db','#9b59b6','#e91e63','#00bcd4','#8bc34a',
+    '#ff5722','#607d8b','#795548','#009688','#673ab7',
+  ];
+
+  function nickColor(name) {
+    let h = 0;
+    for (let i = 0; i < name.length; i++) h = (Math.imul(31, h) + name.charCodeAt(i)) | 0;
+    return NICK_COLORS[Math.abs(h) % NICK_COLORS.length];
+  }
+
+  function myNickname() {
+    return (nicknameInput.value || 'Guest').trim() || 'Guest';
+  }
+
   function appendMessage(m) {
-    const div = document.createElement('div');
-    div.className = 'chat-msg';
+    const isMine = m.nickname === myNickname();
+    const color = nickColor(m.nickname);
+    const initial = m.nickname.charAt(0).toUpperCase();
     const time = m.time ? new Date(m.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
-    div.innerHTML = `<span class="name">${escapeHtml(m.nickname)}</span><div class="text">${escapeHtml(m.text)}</div><div class="time">${time}</div>`;
-    chatMessages.appendChild(div);
+
+    const row = document.createElement('div');
+    row.className = 'chat-msg-row' + (isMine ? ' chat-msg-row--mine' : '');
+
+    const avatar = document.createElement('div');
+    avatar.className = 'chat-avatar';
+    avatar.textContent = initial;
+    avatar.style.background = color;
+
+    const bubble = document.createElement('div');
+    bubble.className = 'chat-bubble' + (isMine ? ' chat-bubble--mine' : '');
+    if (!isMine) bubble.style.borderColor = color;
+
+    bubble.innerHTML =
+      (!isMine ? `<div class="chat-bubble-name" style="color:${color}">${escapeHtml(m.nickname)}</div>` : '') +
+      `<div class="chat-bubble-text">${escapeHtml(m.text)}</div>` +
+      `<div class="chat-bubble-time">${time}</div>`;
+
+    if (isMine) {
+      row.appendChild(bubble);
+      row.appendChild(avatar);
+    } else {
+      row.appendChild(avatar);
+      row.appendChild(bubble);
+    }
+
+    chatMessages.appendChild(row);
     chatMessages.scrollTop = chatMessages.scrollHeight;
   }
 
