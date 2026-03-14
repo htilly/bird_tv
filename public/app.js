@@ -565,20 +565,20 @@
   let currentPlaybackKey = null;
 
   // Default date to today
-  recDate.value = new Date().toISOString().slice(0, 10);
+  if (recDate) recDate.value = new Date().toISOString().slice(0, 10);
 
   function populateRecCameras() {
     recCamera.innerHTML = cameras.map((c) => `<option value="${c.id}">${escapeHtml(c.display_name)}</option>`).join('');
   }
 
-  recToggle.addEventListener('click', () => {
+  if (recToggle) recToggle.addEventListener('click', () => {
     const isOpen = !recPanel.classList.contains('hidden');
     recPanel.classList.toggle('hidden', isOpen);
     recToggle.classList.toggle('active', !isOpen);
     if (!isOpen) populateRecCameras();
   });
 
-  recSearch.addEventListener('click', () => {
+  if (recSearch) recSearch.addEventListener('click', () => {
     const camId = recCamera.value;
     const date = recDate.value;
     if (!camId || !date) return;
