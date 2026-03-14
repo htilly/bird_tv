@@ -114,6 +114,9 @@ router.get('/login', (req, res) => {
           <button type="submit" class="btn btn-primary" style="flex:1">Log in</button>
         </div>
       </form>
+      <div style="text-align:center;margin-top:1rem;">
+        <a href="/" class="btn btn-ghost">&#x25B6; Back to live stream</a>
+      </div>
     </div>
   `));
 });
