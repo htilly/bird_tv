@@ -234,6 +234,23 @@
     if (!infoPanel.classList.contains('hidden')) updateInfoPanel();
   }, 2000);
 
+  // --- Fullscreen button ---
+  const fullscreenBtn = document.getElementById('fullscreen-btn');
+  const videoWrap = document.querySelector('.video-wrap');
+  fullscreenBtn.addEventListener('click', () => {
+    const el = videoWrap;
+    if (el.requestFullscreen) el.requestFullscreen();
+    else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen(); // Safari/iOS
+    else if (video.webkitEnterFullscreen) video.webkitEnterFullscreen(); // iOS fallback
+  });
+  // Hide/show button based on fullscreen state
+  document.addEventListener('fullscreenchange', () => {
+    fullscreenBtn.style.display = document.fullscreenElement ? 'none' : '';
+  });
+  document.addEventListener('webkitfullscreenchange', () => {
+    fullscreenBtn.style.display = document.webkitFullscreenElement ? 'none' : '';
+  });
+
   // --- Emoji picker ---
   const emojiBtn = document.getElementById('emoji-btn');
   const emojiPicker = document.getElementById('emoji-picker');
