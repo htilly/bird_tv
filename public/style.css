@@ -58,6 +58,16 @@ body {
   font-weight: 600;
   margin: 0;
   color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.logo-img {
+  width: 2.2rem;
+  height: 2.2rem;
+  flex-shrink: 0;
+  filter: drop-shadow(0 2px 4px rgba(0,0,0,0.15));
 }
 
 .live-pill {
