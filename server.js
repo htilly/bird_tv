@@ -132,7 +132,7 @@ app.get('/api/visit', (req, res) => {
     id = crypto.randomUUID();
     res.cookie(VISITOR_COOKIE, id, {
       maxAge: VISITOR_MAX_AGE,
-      httpOnly: false,
+      httpOnly: true,
       sameSite: 'lax',
       secure: db.isReverseProxy(),
     });
@@ -151,23 +151,24 @@ const snapshotDir = path.join(__dirname, 'data', 'snapshots');
 fs.mkdirSync(snapshotDir, { recursive: true });
 app.use('/snapshots', express.static(snapshotDir));
 
-let _snapshotLimiter = null;
-let _snapshotLimiterKey = '';
-function getSnapshotLimiter() {
+// Build the snapshot rate limiter once at startup with current settings.
+// Recreating rateLimit() inside a request handler is rejected by express-rate-limit v7+.
+// Instead we keep a single instance and swap it out (outside the request cycle) when settings change.
+function makeSnapshotLimiter() {
   const max = parseInt(db.getSetting('snapshot_rate_max')) || 6;
   const windowSec = parseInt(db.getSetting('snapshot_rate_window_sec')) || 60;
-  const key = `${max}:${windowSec}`;
-  if (_snapshotLimiter && _snapshotLimiterKey === key) return _snapshotLimiter;
-  _snapshotLimiterKey = key;
-  _snapshotLimiter = rateLimit({
+  return rateLimit({
     windowMs: windowSec * 1000,
     max,
     standardHeaders: true,
     legacyHeaders: false,
     message: 'Too many snapshots. Please wait a moment.',
   });
-  return _snapshotLimiter;
 }
+let _snapshotLimiter = makeSnapshotLimiter();
+// Proxy middleware — always calls the current limiter, never creates one inside the handler
+const snapshotRateLimitMiddleware = (req, res, next) => _snapshotLimiter(req, res, next);
+function refreshSnapshotLimiter() { _snapshotLimiter = makeSnapshotLimiter(); }
 
 function getSnapStripStarred() { return Math.max(0, Math.min(20, parseInt(db.getSetting('snap_strip_starred')) || 3)); }
 function getSnapStripTotal() { return Math.max(1, Math.min(20, parseInt(db.getSetting('snap_strip_total')) || 5)); }
@@ -283,13 +284,17 @@ wss.on('connection', (ws) => {
 });
 
 // --- Snapshot POST (after wss so we can broadcast) ---
-app.post('/api/snapshots', (req, res, next) => getSnapshotLimiter()(req, res, next), (req, res) => {
+app.post('/api/snapshots', snapshotRateLimitMiddleware, (req, res) => {
   const { image, nickname, cameraName } = req.body || {};
   if (!image || typeof image !== 'string') return res.status(400).json({ error: 'No image data' });
   const match = image.match(/^data:image\/png;base64,(.+)$/);
   if (!match) return res.status(400).json({ error: 'Invalid image format' });
   const buf = Buffer.from(match[1], 'base64');
   if (buf.length > 5 * 1024 * 1024) return res.status(413).json({ error: 'Image too large' });
+  const pngMagic = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  if (buf.length < pngMagic.length || !buf.slice(0, pngMagic.length).equals(pngMagic)) {
+    return res.status(400).json({ error: 'Invalid image format' });
+  }
   const filename = `snap_${Date.now()}_${crypto.randomBytes(4).toString('hex')}.png`;
   fs.writeFileSync(path.join(snapshotDir, filename), buf);
   const nick = String(nickname || 'Guest').slice(0, 30).trim() || 'Guest';
@@ -302,7 +307,19 @@ app.post('/api/snapshots', (req, res, next) => getSnapshotLimiter()(req, res, ne
   res.json({ ok: true, url: `/snapshots/${filename}` });
 });
 
-app.post('/api/admin/snapshots/:id/star', (req, res) => {
+function requireSameOriginApi(req, res, next) {
+  const origin = req.get('origin');
+  if (origin) {
+    try {
+      const o = new URL(origin);
+      const host = req.get('host') || '';
+      if (o.origin !== `${req.protocol}://${host}`) return res.status(403).json({ error: 'Forbidden' });
+    } catch (_) { return res.status(403).json({ error: 'Forbidden' }); }
+  }
+  next();
+}
+
+app.post('/api/admin/snapshots/:id/star', requireSameOriginApi, (req, res) => {
   if (!req.session || !req.session.userId) return res.status(403).json({ error: 'Forbidden' });
   const id = Number(req.params.id);
   const starred = (req.body || {}).starred !== false && (req.body || {}).starred !== 'false';
@@ -314,12 +331,14 @@ app.post('/api/admin/snapshots/:id/star', (req, res) => {
   res.json({ ok: true, starred });
 });
 
-app.post('/api/admin/snapshots/:id/delete', (req, res) => {
+app.post('/api/admin/snapshots/:id/delete', requireSameOriginApi, (req, res) => {
   if (!req.session || !req.session.userId) return res.status(403).json({ error: 'Forbidden' });
   const id = Number(req.params.id);
   const snap = db.getSnapshot(id);
   if (snap) {
-    const filePath = path.join(snapshotDir, snap.filename);
+    const base = path.basename(snap.filename);
+    if (base !== snap.filename || base.includes('..')) return res.status(400).json({ error: 'Invalid snapshot' });
+    const filePath = path.join(snapshotDir, base);
     try { fs.unlinkSync(filePath); } catch (_) {}
     db.deleteSnapshot(id);
   }
