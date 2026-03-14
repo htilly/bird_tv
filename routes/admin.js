@@ -114,6 +114,7 @@ router.get('/', requireLogin, requireNoSetup, (req, res) => {
       <tbody>${rows || '<tr><td colspan="3">No cameras yet. Add one!</td></tr>'}</tbody>
     </table>
     <p style="margin-top:1rem;">
+      <a href="/admin/users" class="btn btn-ghost">Users</a>
       <a href="/">View public birdcam page</a>
     </p>
     <div style="margin-top:1.5rem;">
@@ -251,6 +252,96 @@ router.post('/cameras/:id/delete', requireLogin, (req, res) => {
     db.deleteCamera(id);
   }
   res.redirect('/admin');
+});
+
+// --- Users ---
+router.get('/users', requireLogin, (req, res) => {
+  const users = db.listUsers();
+  const rows = users.map((u) => {
+    const isSelf = req.session.userId === u.id;
+    const canDelete = db.countUsers() > 1 && !isSelf;
+    return `
+      <tr>
+        <td>${escapeHtml(u.username)}</td>
+        <td>${escapeHtml(u.created_at)}</td>
+        <td>
+          <a href="/admin/users/${u.id}/edit" class="btn btn-small">Change password</a>
+          ${canDelete ? `
+          <form method="post" action="/admin/users/${u.id}/delete" style="display:inline" onsubmit="return confirm('Delete user ${escapeHtml(u.username)}?');">
+            <button type="submit" class="btn btn-small btn-danger">Delete</button>
+          </form>
+          ` : ''}
+        </td>
+      </tr>`;
+  }).join('');
+  res.send(layout('Users', `
+    <h1>Users</h1>
+    <p><a href="/admin/users/new" class="btn btn-primary">Add user</a></p>
+    <table class="admin-table">
+      <thead><tr><th>Username</th><th>Created</th><th>Actions</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="3">No users.</td></tr>'}</tbody>
+    </table>
+    <p><a href="/admin" class="btn btn-ghost">Back to dashboard</a></p>
+  `));
+});
+
+router.get('/users/new', requireLogin, (req, res) => {
+  res.send(layout('Add user', `
+    <h1>Add user</h1>
+    ${req.query.msg ? `<p class="admin-msg">${escapeHtml(req.query.msg)}</p>` : ''}
+    <form method="post" action="/admin/users" class="admin-form">
+      <label>Username <input type="text" name="username" required autofocus></label>
+      <label>Password <input type="password" name="password" required minlength="6"></label>
+      <button type="submit" class="btn btn-primary">Add user</button>
+      <a href="/admin/users" class="btn btn-ghost">Cancel</a>
+    </form>
+  `));
+});
+
+router.post('/users', requireLogin, (req, res) => {
+  const { username, password } = req.body || {};
+  if (!username || !password || password.length < 6) return res.redirect('/admin/users/new');
+  const trimmed = username.trim();
+  if (db.findUserByUsername(trimmed)) {
+    return res.redirect('/admin/users/new?msg=Username+already+exists');
+  }
+  db.createUser(trimmed, password);
+  res.redirect('/admin/users');
+});
+
+router.get('/users/:id/edit', requireLogin, (req, res) => {
+  const id = Number(req.params.id);
+  const u = db.getUser(id);
+  if (!u) return res.redirect('/admin/users');
+  res.send(layout('Change password', `
+    <h1>Change password: ${escapeHtml(u.username)}</h1>
+    <form method="post" action="/admin/users/${id}" class="admin-form">
+      <label>New password <input type="password" name="password" required minlength="6"></label>
+      <button type="submit" class="btn btn-primary">Update password</button>
+      <a href="/admin/users" class="btn btn-ghost">Cancel</a>
+    </form>
+  `));
+});
+
+router.post('/users/:id', requireLogin, (req, res) => {
+  const id = Number(req.params.id);
+  if (!db.getUser(id)) return res.redirect('/admin/users');
+  const password = (req.body || {}).password;
+  if (!password || password.length < 6) return res.redirect(`/admin/users/${id}/edit`);
+  db.updateUserPassword(id, password);
+  res.redirect('/admin/users');
+});
+
+router.post('/users/:id/delete', requireLogin, (req, res) => {
+  const id = Number(req.params.id);
+  if (db.countUsers() <= 1) return res.redirect('/admin/users');
+  if (!db.getUser(id)) return res.redirect('/admin/users');
+  db.deleteUser(id);
+  if (req.session.userId === id) {
+    req.session.destroy(() => res.redirect('/admin/login'));
+    return;
+  }
+  res.redirect('/admin/users');
 });
 
 // --- Debug info API ---

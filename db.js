@@ -81,6 +81,35 @@ function findUserByUsername(username) {
   return getDb().prepare('SELECT * FROM users WHERE username = ?').get(username);
 }
 
+function getUser(id) {
+  return getDb().prepare('SELECT id, username, created_at FROM users WHERE id = ?').get(id);
+}
+
+function listUsers() {
+  return getDb().prepare('SELECT id, username, created_at FROM users ORDER BY id').all();
+}
+
+function countUsers() {
+  return getDb().prepare('SELECT COUNT(*) as n FROM users').get().n;
+}
+
+function createUser(username, password) {
+  const bcrypt = require('bcryptjs');
+  const hash = bcrypt.hashSync(password, 10);
+  const r = getDb().prepare('INSERT INTO users (username, password_hash) VALUES (?, ?)').run(username, hash);
+  return r.lastInsertRowid;
+}
+
+function updateUserPassword(id, newPassword) {
+  const bcrypt = require('bcryptjs');
+  const hash = bcrypt.hashSync(newPassword, 10);
+  getDb().prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hash, id);
+}
+
+function deleteUser(id) {
+  getDb().prepare('DELETE FROM users WHERE id = ?').run(id);
+}
+
 function verifyPassword(password, hash) {
   return require('bcryptjs').compareSync(password, hash);
 }
@@ -120,6 +149,12 @@ module.exports = {
   buildRtspUrl,
   ensureAdmin,
   findUserByUsername,
+  getUser,
+  listUsers,
+  countUsers,
+  createUser,
+  updateUserPassword,
+  deleteUser,
   verifyPassword,
   listCameras,
   getCamera,

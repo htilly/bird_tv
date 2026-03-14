@@ -1,0 +1,23 @@
+# Build and run directly from GitHub (no local clone needed).
+# Usage: docker compose -f docker-compose.github.yml up -d
+
+services:
+  birdcam:
+    build:
+      context: https://github.com/htilly/bird_tv.git
+      dockerfile: Dockerfile
+    container_name: bird_tv
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      # Optional: create first admin on first run
+      # - ADMIN_USER=admin
+      # - ADMIN_PASSWORD=changeme
+      # - SESSION_SECRET=your-random-secret
+    volumes:
+      - birdcam-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  birdcam-data:
