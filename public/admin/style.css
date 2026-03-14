@@ -474,6 +474,44 @@
 }
 
 /* --- Snapshots admin --- */
+.snap-bulk-bar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.6rem 0.75rem;
+  background: #f8f8f8;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  margin-bottom: 0.5rem;
+}
+.snap-bulk-select-all {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.9rem;
+  cursor: pointer;
+  user-select: none;
+}
+.snap-admin-check-wrap {
+  position: absolute;
+  top: 0.4rem;
+  left: 0.4rem;
+  z-index: 2;
+  cursor: pointer;
+}
+.snap-admin-check-wrap input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
+  accent-color: #e53e3e;
+}
+.snap-admin-card {
+  position: relative;
+}
+.snap-admin-card:has(.snap-admin-check:checked) {
+  outline: 3px solid #e53e3e;
+  outline-offset: 2px;
+}
 .snap-admin-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));

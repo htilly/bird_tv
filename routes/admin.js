@@ -632,7 +632,8 @@ router.get('/visitors', requireLogin, (req, res) => {
 // --- Snapshots admin ---
 
 router.get('/snapshots', requireLogin, (req, res) => {
-  const snaps = db.getAllSnapshots(100);
+  const snaps = db.getAllSnapshots(200);
+  const csrfToken = csrfField(req);
   let content;
   if (snaps.length) {
     const cards = snaps.map((s) => {
@@ -640,7 +641,10 @@ router.get('/snapshots', requireLogin, (req, res) => {
       const starLabel = s.starred ? 'Unstar' : 'Star';
       const starIcon = s.starred ? '&#x2B50;' : '&#x2606;';
       return `
-        <div class="${starClass}">
+        <div class="${starClass}" data-id="${s.id}">
+          <label class="snap-admin-check-wrap" title="Select">
+            <input type="checkbox" class="snap-admin-check" value="${s.id}">
+          </label>
           <a href="/snapshots/${escapeHtml(s.filename)}" target="_blank" class="snap-admin-thumb-link">
             <img src="/snapshots/${escapeHtml(s.filename)}" alt="Snapshot" class="snap-admin-thumb" loading="lazy">
             ${s.starred ? '<span class="snap-admin-starred-badge">&#x2B50; Starred</span>' : ''}
@@ -652,12 +656,12 @@ router.get('/snapshots', requireLogin, (req, res) => {
           </div>
           <div class="snap-admin-actions">
             <form method="post" action="/admin/snapshots/${s.id}/star" style="display:inline">
-              ${csrfField(req)}
+              ${csrfToken}
               <input type="hidden" name="starred" value="${s.starred ? '0' : '1'}">
               <button type="submit" class="btn btn-small ${s.starred ? 'btn-ghost' : ''}" title="${starLabel}">${starIcon} ${starLabel}</button>
             </form>
             <form method="post" action="/admin/snapshots/${s.id}/delete" style="display:inline" onsubmit="return confirm('Delete this snapshot?');">
-              ${csrfField(req)}
+              ${csrfToken}
               <button type="submit" class="btn btn-small btn-danger">Delete</button>
             </form>
           </div>
@@ -665,7 +669,16 @@ router.get('/snapshots', requireLogin, (req, res) => {
     }).join('');
     content = `
       ${req.query.msg ? `<div class="admin-msg admin-msg-ok">${escapeHtml(req.query.msg)}</div>` : ''}
-      <div class="snap-admin-grid">${cards}</div>`;
+      <form method="post" action="/admin/snapshots/bulk-delete" id="bulk-form" onsubmit="return confirmBulk()">
+        ${csrfToken}
+        <div class="snap-bulk-bar">
+          <label class="snap-bulk-select-all">
+            <input type="checkbox" id="snap-select-all"> Select all
+          </label>
+          <button type="submit" class="btn btn-danger" id="bulk-delete-btn" disabled>&#x1F5D1; Delete selected (<span id="bulk-count">0</span>)</button>
+        </div>
+        <div class="snap-admin-grid">${cards}</div>
+      </form>`;
   } else {
     content = `
       <div class="empty-state">
@@ -677,8 +690,33 @@ router.get('/snapshots', requireLogin, (req, res) => {
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;">
       <h1 style="margin:0">Snapshots</h1>
     </div>
-    <p class="visitors-desc">Star a snapshot to pin it above the latest three for all viewers. Only one snapshot can be starred at a time.</p>
+    <p class="visitors-desc">Star a snapshot to pin it in the strip for all viewers.</p>
     ${content}
+    <script>
+      (function() {
+        const checkboxes = document.querySelectorAll('.snap-admin-check');
+        const selectAll = document.getElementById('snap-select-all');
+        const bulkBtn = document.getElementById('bulk-delete-btn');
+        const countEl = document.getElementById('bulk-count');
+        function updateBulk() {
+          const n = document.querySelectorAll('.snap-admin-check:checked').length;
+          countEl.textContent = n;
+          bulkBtn.disabled = n === 0;
+        }
+        if (selectAll) selectAll.addEventListener('change', () => {
+          checkboxes.forEach(c => c.checked = selectAll.checked);
+          updateBulk();
+        });
+        checkboxes.forEach(c => c.addEventListener('change', () => {
+          if (!c.checked && selectAll) selectAll.checked = false;
+          updateBulk();
+        }));
+      })();
+      function confirmBulk() {
+        const n = document.querySelectorAll('.snap-admin-check:checked').length;
+        return n > 0 && confirm('Delete ' + n + ' snapshot' + (n > 1 ? 's' : '') + '? This cannot be undone.');
+      }
+    </script>
   `));
 });
 
@@ -700,6 +738,24 @@ router.post('/snapshots/:id/delete', requireLogin, verifyCsrf, (req, res) => {
     db.deleteSnapshot(id);
   }
   res.redirect('/admin/snapshots?msg=Snapshot+deleted');
+});
+
+router.post('/snapshots/bulk-delete', requireLogin, verifyCsrf, (req, res) => {
+  let ids = req.body.ids || req.body['ids[]'] || [];
+  if (!Array.isArray(ids)) ids = [ids];
+  ids = ids.map(Number).filter(n => n > 0);
+  const snapshotDir = path.join(__dirname, '..', 'data', 'snapshots');
+  for (const id of ids) {
+    const snap = db.getSnapshot(id);
+    if (snap) {
+      const base = path.basename(snap.filename);
+      if (base === snap.filename && !base.includes('..')) {
+        try { fs.unlinkSync(path.join(snapshotDir, base)); } catch (_) {}
+      }
+    }
+  }
+  db.deleteSnapshots(ids);
+  res.redirect('/admin/snapshots?msg=' + encodeURIComponent(`Deleted ${ids.length} snapshot${ids.length !== 1 ? 's' : ''}`));
 });
 
 // --- Settings ---

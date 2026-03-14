@@ -271,6 +271,12 @@ function deleteSnapshot(id) {
   return getDb().prepare("DELETE FROM snapshots WHERE id = ?").run(id);
 }
 
+function deleteSnapshots(ids) {
+  if (!ids || !ids.length) return;
+  const placeholders = ids.map(() => '?').join(',');
+  return getDb().prepare(`DELETE FROM snapshots WHERE id IN (${placeholders})`).run(...ids);
+}
+
 function setSnapshotStarred(id, starred) {
   // Only one snapshot can be starred at a time
   const d = getDb();
@@ -366,6 +372,7 @@ module.exports = {
   getLatestSnapshots,
   getAllSnapshots,
   deleteSnapshot,
+  deleteSnapshots,
   getStarredSnapshots,
   getAllStarredSnapshots,
   setSnapshotStarred,

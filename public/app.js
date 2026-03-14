@@ -272,14 +272,18 @@
     });
   }
 
-  // Search across all emojis
+  // Search across all emojis by category name
   searchInput.addEventListener('input', () => {
-    const q = searchInput.value.trim();
+    const q = searchInput.value.trim().toLowerCase();
     if (!q) { renderCategory(EMOJI_CATEGORIES[0].emojis); return; }
-    const all = EMOJI_CATEGORIES.flatMap(c => c.emojis);
-    // Simple filter: match by codepoint string or just show all that contain query chars
-    const results = all.filter(em => em.includes(q));
-    renderCategory(results.length ? results : all.slice(0, 60));
+    // Match categories whose label contains the query, collect their emojis
+    const results = EMOJI_CATEGORIES
+      .filter(c => c.label.toLowerCase().includes(q))
+      .flatMap(c => c.emojis);
+    // Also include direct emoji character matches (user pasted an emoji)
+    const charMatches = EMOJI_CATEGORIES.flatMap(c => c.emojis).filter(em => em.includes(q));
+    const combined = [...new Set([...results, ...charMatches])];
+    renderCategory(combined.length ? combined : []);
   });
 
   renderCategory(EMOJI_CATEGORIES[0].emojis);
