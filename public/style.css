@@ -1093,7 +1093,7 @@ body {
   .chat-section {
     width: 100%;
     flex-shrink: 0;
-    max-height: 280px;
+    max-height: 320px;
   }
 }
 
@@ -1152,7 +1152,7 @@ body {
   .chat-section {
     border-radius: var(--radius-sm);
     flex-shrink: 0;
-    max-height: 240px;
+    max-height: 300px;
   }
   .chat-title {
     padding: 0.6rem 1rem;
@@ -1211,7 +1211,7 @@ body {
     min-height: 180px;
   }
   .chat-section {
-    max-height: 200px;
+    max-height: 260px;
   }
 }
 
