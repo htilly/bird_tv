@@ -34,8 +34,13 @@ function init() {
       rtsp_path TEXT NOT NULL DEFAULT '',
       rtsp_username TEXT NOT NULL DEFAULT '',
       rtsp_password TEXT NOT NULL DEFAULT '',
+      xmeye_password TEXT NOT NULL DEFAULT '',
       created_at TEXT DEFAULT (datetime('now')),
       updated_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
     );
   `);
 }
@@ -51,7 +56,6 @@ function migrate() {
       ALTER TABLE cameras ADD COLUMN rtsp_username TEXT NOT NULL DEFAULT '';
       ALTER TABLE cameras ADD COLUMN rtsp_password TEXT NOT NULL DEFAULT '';
     `);
-    // Migrate existing rtsp_url values into separate fields
     const cameras = d.prepare('SELECT id, rtsp_url FROM cameras').all();
     const update = d.prepare('UPDATE cameras SET rtsp_host = ?, rtsp_port = ?, rtsp_path = ?, rtsp_username = ?, rtsp_password = ? WHERE id = ?');
     for (const cam of cameras) {
@@ -61,11 +65,57 @@ function migrate() {
       } catch (_) {}
     }
   }
+  if (!cols.includes('xmeye_password')) {
+    d.exec(`ALTER TABLE cameras ADD COLUMN xmeye_password TEXT NOT NULL DEFAULT '';`);
+  }
+
+  // Ensure settings table exists (for upgrades from older versions)
+  const tables = d.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='settings'").get();
+  if (!tables) {
+    d.exec(`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
+  }
+}
+
+// --- Settings ---
+const DEFAULT_SETTINGS = {
+  reverse_proxy: 'false',
+  require_auth_streams: 'false',
+};
+
+function getSetting(key) {
+  const row = getDb().prepare('SELECT value FROM settings WHERE key = ?').get(key);
+  return row ? row.value : (DEFAULT_SETTINGS[key] || '');
+}
+
+function setSetting(key, value) {
+  getDb().prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(key, String(value));
+}
+
+function getAllSettings() {
+  const rows = getDb().prepare('SELECT key, value FROM settings').all();
+  const result = { ...DEFAULT_SETTINGS };
+  for (const row of rows) {
+    result[row.key] = row.value;
+  }
+  return result;
+}
+
+function isReverseProxy() {
+  return getSetting('reverse_proxy') === 'true';
 }
 
 function buildRtspUrl(host, port, urlPath, username, password) {
   const auth = username ? `${encodeURIComponent(username)}:${encodeURIComponent(password)}@` : '';
   return `rtsp://${auth}${host}:${port}${urlPath.startsWith('/') ? '' : '/'}${urlPath}`;
+}
+
+function validateRtspUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'rtsp:';
+  } catch (_) {
+    return false;
+  }
 }
 
 function ensureAdmin(username, password) {
@@ -122,20 +172,26 @@ function getCamera(id) {
   return getDb().prepare('SELECT * FROM cameras WHERE id = ?').get(id);
 }
 
-function createCamera(display_name, host, port, urlPath, username, password) {
+function createCamera(display_name, host, port, urlPath, username, password, xmeye_password) {
   const d = getDb();
   const rtsp_url = buildRtspUrl(host, port, urlPath, username, password);
+  if (!validateRtspUrl(rtsp_url)) {
+    throw new Error('Invalid RTSP URL — only rtsp:// URLs are allowed');
+  }
   const r = d.prepare(
-    "INSERT INTO cameras (display_name, rtsp_url, rtsp_host, rtsp_port, rtsp_path, rtsp_username, rtsp_password, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))"
-  ).run(display_name, rtsp_url, host, port, urlPath, username, password);
+    "INSERT INTO cameras (display_name, rtsp_url, rtsp_host, rtsp_port, rtsp_path, rtsp_username, rtsp_password, xmeye_password, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))"
+  ).run(display_name, rtsp_url, host, port, urlPath, username, password, xmeye_password || '');
   return r.lastInsertRowid;
 }
 
-function updateCamera(id, display_name, host, port, urlPath, username, password) {
+function updateCamera(id, display_name, host, port, urlPath, username, password, xmeye_password) {
   const rtsp_url = buildRtspUrl(host, port, urlPath, username, password);
+  if (!validateRtspUrl(rtsp_url)) {
+    throw new Error('Invalid RTSP URL — only rtsp:// URLs are allowed');
+  }
   getDb().prepare(
-    "UPDATE cameras SET display_name = ?, rtsp_url = ?, rtsp_host = ?, rtsp_port = ?, rtsp_path = ?, rtsp_username = ?, rtsp_password = ?, updated_at = datetime('now') WHERE id = ?"
-  ).run(display_name, rtsp_url, host, port, urlPath, username, password, id);
+    "UPDATE cameras SET display_name = ?, rtsp_url = ?, rtsp_host = ?, rtsp_port = ?, rtsp_path = ?, rtsp_username = ?, rtsp_password = ?, xmeye_password = ?, updated_at = datetime('now') WHERE id = ?"
+  ).run(display_name, rtsp_url, host, port, urlPath, username, password, xmeye_password || '', id);
 }
 
 function deleteCamera(id) {
@@ -147,6 +203,7 @@ module.exports = {
   init,
   migrate,
   buildRtspUrl,
+  validateRtspUrl,
   ensureAdmin,
   findUserByUsername,
   getUser,
@@ -161,4 +218,8 @@ module.exports = {
   createCamera,
   updateCamera,
   deleteCamera,
+  getSetting,
+  setSetting,
+  getAllSettings,
+  isReverseProxy,
 };

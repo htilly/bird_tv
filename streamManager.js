@@ -5,6 +5,7 @@ const db = require('./db');
 
 const hlsDir = path.join(__dirname, 'hls');
 const processes = new Map();
+const stopping = new Set(); // tracks intentional stops to prevent auto-restart
 const MAX_LOG_LINES = 200;
 const logs = new Map(); // cameraId -> string[]
 
@@ -13,7 +14,14 @@ function ensureHlsDir() {
 }
 
 function startStream(cameraId, rtspUrl) {
+  // Validate RTSP URL scheme
+  if (!db.validateRtspUrl(rtspUrl)) {
+    console.error(`Camera ${cameraId}: refusing to start — invalid RTSP URL`);
+    return null;
+  }
+
   stopStream(cameraId);
+  stopping.delete(cameraId); // clear stop flag since we're intentionally starting
   ensureHlsDir();
   const outBase = path.join(hlsDir, `cam-${cameraId}`);
   const outM3u8 = `${outBase}.m3u8`;
@@ -69,12 +77,14 @@ function startStream(cameraId, rtspUrl) {
   });
   child.on('exit', (code, signal) => {
     processes.delete(cameraId);
-    if (code !== 0 && code !== null) {
+    // Only auto-restart on unexpected exits (not intentional stops)
+    if (!stopping.has(cameraId) && code !== 0 && code !== null) {
       setTimeout(() => {
         const cam = db.getCamera(cameraId);
         if (cam) startStream(cameraId, cam.rtsp_url);
       }, 5000);
     }
+    stopping.delete(cameraId);
   });
   processes.set(cameraId, child);
   return child;
@@ -83,7 +93,13 @@ function startStream(cameraId, rtspUrl) {
 function stopStream(cameraId) {
   const child = processes.get(cameraId);
   if (child && child.kill) {
-    child.kill('SIGKILL');
+    stopping.add(cameraId); // mark as intentional stop
+    // Graceful: SIGTERM first, force SIGKILL after 5s
+    child.kill('SIGTERM');
+    const killTimer = setTimeout(() => {
+      try { child.kill('SIGKILL'); } catch (_) {}
+    }, 5000);
+    child.once('exit', () => clearTimeout(killTimer));
     processes.delete(cameraId);
   }
   const prefix = `cam-${cameraId}`;

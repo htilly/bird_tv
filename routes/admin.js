@@ -1,4 +1,5 @@
 const express = require('express');
+const crypto = require('crypto');
 const os = require('os');
 const router = express.Router();
 const db = require('../db');
@@ -16,7 +17,60 @@ function escapeHtml(s) {
     .replace(/"/g, '&quot;');
 }
 
-const layout = (title, body) => `
+function friendlyDate(iso) {
+  if (!iso) return '';
+  try {
+    const d = new Date(iso + 'Z');
+    return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+  } catch (_) { return iso; }
+}
+
+// --- Simple CSRF using session-bound tokens ---
+function generateCsrfToken(req) {
+  const token = crypto.randomBytes(32).toString('hex');
+  req.session._csrf = token;
+  return token;
+}
+
+function csrfField(req) {
+  const token = generateCsrfToken(req);
+  return `<input type="hidden" name="_csrf" value="${token}">`;
+}
+
+function verifyCsrf(req, res, next) {
+  const token = (req.body && req.body._csrf) || '';
+  if (!req.session._csrf || token !== req.session._csrf) {
+    return res.status(403).send(layout('Error', '', `
+      <h1>Invalid request</h1>
+      <p>Your session may have expired. Please <a href="/admin">go back</a> and try again.</p>
+    `));
+  }
+  delete req.session._csrf;
+  next();
+}
+
+function nav(active) {
+  const items = [
+    { id: 'cameras', label: 'Cameras', icon: '&#x1F3A5;', href: '/admin' },
+    { id: 'users', label: 'Users', icon: '&#x1F465;', href: '/admin/users' },
+    { id: 'settings', label: 'Settings', icon: '&#x2699;&#xFE0F;', href: '/admin/settings' },
+  ];
+  const links = items.map(i =>
+    `<a href="${i.href}" class="nav-item ${active === i.id ? 'active' : ''}"><span class="nav-icon">${i.icon}</span>${i.label}</a>`
+  ).join('');
+  return `<nav class="admin-nav">${links}<span class="nav-sep"></span><a href="/" class="nav-item"><span class="nav-icon">&#x1F426;</span>View live</a></nav>`;
+}
+
+function breadcrumb(...parts) {
+  if (!parts.length) return '';
+  const links = parts.map((p, i) => {
+    if (i === parts.length - 1) return `<span>${escapeHtml(p.label)}</span>`;
+    return `<a href="${p.href}">${escapeHtml(p.label)}</a><span class="sep">/</span>`;
+  }).join('');
+  return `<div class="breadcrumb">${links}</div>`;
+}
+
+const layout = (title, navHtml, body) => `
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -31,27 +85,40 @@ const layout = (title, body) => `
       <a href="/admin">Birdcam Admin</a>
       ${title !== 'Login' && title !== 'Setup' ? '<a href="/admin/logout" class="btn btn-ghost">Logout</a>' : ''}
     </header>
-    <main class="admin-main">${body}</main>
+    <main class="admin-main">
+      ${navHtml}
+      ${body}
+    </main>
   </div>
 </body>
 </html>`;
+
+// --- Login / Logout / Setup ---
 
 router.get('/login', (req, res) => {
   if (req.session && req.session.userId) return res.redirect('/admin');
   const hasUser = db.getDb().prepare('SELECT 1 FROM users LIMIT 1').get();
   if (!hasUser) return res.redirect('/admin/setup');
-  res.send(layout('Login', `
-    <h1>Log in</h1>
-    <form method="post" action="/admin/login" class="admin-form">
-      <label>Username <input type="text" name="username" required autofocus></label>
-      <label>Password <input type="password" name="password" required></label>
-      <button type="submit" class="btn btn-primary">Log in</button>
-    </form>
-    ${req.query.msg ? `<p class="admin-msg">${escapeHtml(req.query.msg)}</p>` : ''}
+  res.send(layout('Login', '', `
+    <div class="login-box">
+      <div class="login-icon">&#x1F426;</div>
+      <h1>Log in to Birdcam</h1>
+      ${req.query.msg ? `<div class="admin-msg">${escapeHtml(req.query.msg)}</div>` : ''}
+      <form method="post" action="/admin/login" class="admin-form">
+        ${csrfField(req)}
+        <label for="login-user">Username</label>
+        <input type="text" id="login-user" name="username" required autofocus placeholder="Enter username">
+        <label for="login-pw">Password</label>
+        <input type="password" id="login-pw" name="password" required placeholder="Enter password">
+        <div class="form-actions">
+          <button type="submit" class="btn btn-primary" style="flex:1">Log in</button>
+        </div>
+      </form>
+    </div>
   `));
 });
 
-router.post('/login', (req, res) => {
+router.post('/login', verifyCsrf, (req, res) => {
   const { username, password } = req.body || {};
   const user = db.findUserByUsername(username);
   if (!user || !db.verifyPassword(password, user.password_hash)) {
@@ -67,18 +134,26 @@ router.get('/logout', (req, res) => {
 });
 
 router.get('/setup', requireSetup, (req, res) => {
-  res.send(layout('Setup', `
-    <h1>Create admin account</h1>
-    <p>No admin user yet. Create the first one.</p>
-    <form method="post" action="/admin/setup" class="admin-form">
-      <label>Username <input type="text" name="username" required autofocus></label>
-      <label>Password <input type="password" name="password" required minlength="6"></label>
-      <button type="submit" class="btn btn-primary">Create admin</button>
-    </form>
+  res.send(layout('Setup', '', `
+    <div class="login-box">
+      <div class="login-icon">&#x1F426;</div>
+      <h1>Welcome to Birdcam</h1>
+      <p style="text-align:center;color:#718096;margin-bottom:1.5rem;">Create your admin account to get started.</p>
+      <form method="post" action="/admin/setup" class="admin-form">
+        ${csrfField(req)}
+        <label for="setup-user">Username</label>
+        <input type="text" id="setup-user" name="username" required autofocus placeholder="Choose a username">
+        <label for="setup-pw">Password</label>
+        <input type="password" id="setup-pw" name="password" required minlength="6" placeholder="Min. 6 characters">
+        <div class="form-actions">
+          <button type="submit" class="btn btn-primary" style="flex:1">Create admin account</button>
+        </div>
+      </form>
+    </div>
   `));
 });
 
-router.post('/setup', requireSetup, (req, res) => {
+router.post('/setup', requireSetup, verifyCsrf, (req, res) => {
   const { username, password } = req.body || {};
   if (!username || !password || password.length < 6) {
     return res.redirect('/admin/setup');
@@ -90,35 +165,47 @@ router.post('/setup', requireSetup, (req, res) => {
   res.redirect('/admin');
 });
 
+// --- Dashboard ---
+
 router.get('/', requireLogin, requireNoSetup, (req, res) => {
   const cameras = db.listCameras();
-  const rows = cameras.map((c) => {
-    const running = streamManager.isRunning(c.id);
-    return `
-      <tr>
-        <td>${escapeHtml(c.display_name)}</td>
-        <td><span class="status ${running ? 'on' : 'off'}">${running ? 'Live' : 'Off'}</span></td>
-        <td>
-          <a href="/admin/cameras/${c.id}/edit" class="btn btn-small">Edit</a>
-          <form method="post" action="/admin/cameras/${c.id}/delete" style="display:inline" onsubmit="return confirm('Delete this camera?');">
-            <button type="submit" class="btn btn-small btn-danger">Delete</button>
-          </form>
-        </td>
-      </tr>`;
-  }).join('');
-  res.send(layout('Dashboard', `
-    <h1>Cameras</h1>
-    <p><a href="/admin/cameras/new" class="btn btn-primary">Add camera</a></p>
-    <table class="admin-table">
-      <thead><tr><th>Name</th><th>Status</th><th>Actions</th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="3">No cameras yet. Add one!</td></tr>'}</tbody>
-    </table>
-    <p style="margin-top:1rem;">
-      <a href="/admin/users" class="btn btn-ghost">Users</a>
-      <a href="/">View public birdcam page</a>
-    </p>
-    <div style="margin-top:1.5rem;">
-      <button type="button" class="btn btn-small" id="debug-toggle">Debug</button>
+  let cameraList;
+  if (cameras.length) {
+    const cards = cameras.map((c) => {
+      const running = streamManager.isRunning(c.id);
+      return `
+        <div class="camera-card">
+          <div class="camera-card-info">
+            <div class="camera-card-name">${escapeHtml(c.display_name)}</div>
+            <div class="camera-card-meta">${escapeHtml(c.rtsp_host)}:${c.rtsp_port}${escapeHtml(c.rtsp_path)}</div>
+          </div>
+          <span class="status ${running ? 'on' : 'off'}"><span class="status-dot"></span>${running ? 'Live' : 'Off'}</span>
+          <div class="camera-card-actions">
+            <a href="/admin/cameras/${c.id}/edit" class="btn btn-small">Edit</a>
+            <form method="post" action="/admin/cameras/${c.id}/delete" style="display:inline" onsubmit="return confirm('Delete camera &quot;${escapeHtml(c.display_name)}&quot;?');">
+              ${csrfField(req)}
+              <button type="submit" class="btn btn-small btn-danger">Delete</button>
+            </form>
+          </div>
+        </div>`;
+    }).join('');
+    cameraList = `<div class="camera-cards">${cards}</div>`;
+  } else {
+    cameraList = `
+      <div class="empty-state">
+        <div class="empty-state-icon">&#x1F3A5;</div>
+        <p class="empty-state-text">No cameras yet. Add your first one!</p>
+        <a href="/admin/cameras/new" class="btn btn-primary">Add camera</a>
+      </div>`;
+  }
+  res.send(layout('Dashboard', nav('cameras'), `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;">
+      <h1 style="margin:0">Cameras</h1>
+      ${cameras.length ? '<a href="/admin/cameras/new" class="btn btn-primary btn-small">+ Add camera</a>' : ''}
+    </div>
+    ${cameraList}
+    <div style="margin-top:1rem;">
+      <button type="button" class="btn btn-small btn-ghost" id="debug-toggle">&#x1F41B; Debug</button>
       <div id="debug-panel" class="debug-panel" style="display:none;"></div>
     </div>
     <script>
@@ -137,35 +224,23 @@ router.get('/', requireLogin, requireNoSetup, (req, res) => {
       function fetchDebug() {
         fetch('/admin/api/debug-info').then(r => r.json()).then(info => {
           let html = '<h3>System</h3><table class="admin-table debug-table">';
-          html += '<tr><td>Build time</td><td>' + escH(info.buildTime) + '</td></tr>';
           html += '<tr><td>Server uptime</td><td>' + escH(info.uptime) + '</td></tr>';
           html += '<tr><td>Node.js</td><td>' + escH(info.nodeVersion) + '</td></tr>';
-          html += '<tr><td>Platform</td><td>' + escH(info.platform + ' ' + info.arch) + '</td></tr>';
-          html += '<tr><td>Hostname</td><td>' + escH(info.hostname) + '</td></tr>';
           html += '<tr><td>Memory (RSS)</td><td>' + escH(info.memoryMB + ' MB') + '</td></tr>';
-          html += '<tr><td>Free system mem</td><td>' + escH(info.freeMemMB + ' MB') + '</td></tr>';
-          html += '</table>';
-
-          html += '<h3>Environment</h3><table class="admin-table debug-table">';
-          for (const [k,v] of Object.entries(info.env)) {
-            html += '<tr><td>' + escH(k) + '</td><td>' + escH(v) + '</td></tr>';
-          }
           html += '</table>';
 
           html += '<h3>Cameras</h3><table class="admin-table debug-table">';
-          html += '<tr><th>ID</th><th>Name</th><th>Status</th><th>Log lines</th></tr>';
+          html += '<tr><th>ID</th><th>Name</th><th>Status</th><th>Logs</th></tr>';
           for (const cam of info.cameras) {
             html += '<tr><td>' + cam.id + '</td><td>' + escH(cam.name) + '</td>';
-            html += '<td><span class="status ' + (cam.running ? 'on' : 'off') + '">' + (cam.running ? 'Live' : 'Off') + '</span></td>';
+            html += '<td><span class="status ' + (cam.running ? 'on' : 'off') + '"><span class="status-dot"></span>' + (cam.running ? 'Live' : 'Off') + '</span></td>';
             html += '<td>' + cam.logLines + '</td></tr>';
             if (cam.streamInfo && cam.streamInfo.length) {
-              html += '<tr><td colspan="4"><pre style="margin:0.25rem 0 0.5rem;font-size:0.75rem;background:#1a202c;color:#68d391;padding:0.5rem;border-radius:6px;white-space:pre-wrap;word-break:break-all">' + cam.streamInfo.map(l => escH(l)).join('\n') + '</pre></td></tr>';
+              html += '<tr><td colspan="4"><pre style="margin:0.25rem 0 0.5rem;font-size:0.75rem;background:#1a202c;color:#68d391;padding:0.5rem;border-radius:6px;white-space:pre-wrap;word-break:break-all">' + cam.streamInfo.map(l => escH(l)).join('\\n') + '</pre></td></tr>';
             }
           }
           html += '</table>';
-
           html += '<p style="margin-top:0.75rem;"><a href="/admin/debug" class="btn btn-small">View FFmpeg Logs</a></p>';
-
           panel.innerHTML = html;
         }).catch(() => { panel.innerHTML = '<p>Failed to load debug info.</p>'; });
       }
@@ -173,7 +248,7 @@ router.get('/', requireLogin, requireNoSetup, (req, res) => {
       btn.addEventListener('click', () => {
         open = !open;
         panel.style.display = open ? 'block' : 'none';
-        btn.textContent = open ? 'Hide Debug' : 'Debug';
+        btn.textContent = open ? '\\u{1F41B} Hide Debug' : '\\u{1F41B} Debug';
         if (open) {
           fetchDebug();
           polling = setInterval(fetchDebug, 5000);
@@ -187,65 +262,150 @@ router.get('/', requireLogin, requireNoSetup, (req, res) => {
   `));
 });
 
+// --- Cameras ---
+
 router.get('/cameras/new', requireLogin, (req, res) => {
-  res.send(layout('Add camera', `
+  res.send(layout('Add camera', nav('cameras'), `
+    ${breadcrumb({ label: 'Cameras', href: '/admin' }, { label: 'Add camera' })}
     <h1>Add camera</h1>
+    ${req.query.msg ? `<div class="admin-msg">${escapeHtml(req.query.msg)}</div>` : ''}
     <form method="post" action="/admin/cameras" class="admin-form">
-      <label>Display name <input type="text" name="display_name" required placeholder="e.g. Garden bird feeder"></label>
-      <label>Host / IP <input type="text" name="rtsp_host" required placeholder="192.168.1.100"></label>
-      <label>Port <input type="text" name="rtsp_port" value="554" placeholder="554"></label>
-      <label>Username <input type="text" name="rtsp_username" placeholder="admin" autocomplete="off"></label>
-      <label>Password <input type="password" name="rtsp_password" placeholder="password" autocomplete="off"></label>
-      <label>Path <input type="text" name="rtsp_path" placeholder="/stream1"></label>
-      <button type="submit" class="btn btn-primary">Add camera</button>
-      <a href="/admin" class="btn btn-ghost">Cancel</a>
+      ${csrfField(req)}
+      <div class="form-section">
+        <p class="form-section-title">Display</p>
+        <label for="cam-name">Camera name</label>
+        <input type="text" id="cam-name" name="display_name" required placeholder="e.g. Garden bird feeder">
+      </div>
+      <div class="form-section">
+        <p class="form-section-title">RTSP Connection</p>
+        <div class="form-row">
+          <div>
+            <label for="cam-host">Host / IP</label>
+            <input type="text" id="cam-host" name="rtsp_host" required placeholder="192.168.1.100">
+          </div>
+          <div class="form-col-sm">
+            <label for="cam-port">Port</label>
+            <input type="text" id="cam-port" name="rtsp_port" value="554" placeholder="554">
+          </div>
+        </div>
+        <label for="cam-path">Path</label>
+        <input type="text" id="cam-path" name="rtsp_path" placeholder="/stream1">
+        <div class="form-row">
+          <div>
+            <label for="cam-user">Username</label>
+            <input type="text" id="cam-user" name="rtsp_username" placeholder="admin" autocomplete="off">
+          </div>
+          <div>
+            <label for="cam-pass">Password</label>
+            <input type="password" id="cam-pass" name="rtsp_password" placeholder="password" autocomplete="off">
+          </div>
+        </div>
+      </div>
+      <div class="form-section">
+        <p class="form-section-title">XMEye / Web access</p>
+        <label for="cam-xmeye">XMEye password</label>
+        <input type="password" id="cam-xmeye" name="xmeye_password" placeholder="Leave blank if same as RTSP" autocomplete="off">
+        <p class="field-hint">Only needed if your camera uses a different password for web/recording access.</p>
+      </div>
+      <div class="form-actions">
+        <button type="submit" class="btn btn-primary">Add camera</button>
+        <a href="/admin" class="btn btn-ghost">Cancel</a>
+      </div>
     </form>
   `));
 });
 
-router.post('/cameras', requireLogin, (req, res) => {
-  const { display_name, rtsp_host, rtsp_port, rtsp_path, rtsp_username, rtsp_password } = req.body || {};
+router.post('/cameras', requireLogin, verifyCsrf, (req, res) => {
+  const { display_name, rtsp_host, rtsp_port, rtsp_path, rtsp_username, rtsp_password, xmeye_password } = req.body || {};
   if (!display_name || !rtsp_host) return res.redirect('/admin/cameras/new');
   const port = parseInt(rtsp_port) || 554;
-  const id = db.createCamera(display_name.trim(), rtsp_host.trim(), port, (rtsp_path || '').trim(), (rtsp_username || '').trim(), (rtsp_password || '').trim());
-  const cam = db.getCamera(id);
-  streamManager.startStream(id, cam.rtsp_url);
-  res.redirect('/admin');
+  try {
+    const id = db.createCamera(display_name.trim(), rtsp_host.trim(), port, (rtsp_path || '').trim(), (rtsp_username || '').trim(), (rtsp_password || '').trim(), (xmeye_password || '').trim());
+    const cam = db.getCamera(id);
+    streamManager.startStream(id, cam.rtsp_url);
+    res.redirect('/admin');
+  } catch (err) {
+    res.redirect('/admin/cameras/new?msg=' + encodeURIComponent(err.message));
+  }
 });
 
 router.get('/cameras/:id/edit', requireLogin, (req, res) => {
   const c = db.getCamera(Number(req.params.id));
   if (!c) return res.redirect('/admin');
-  res.send(layout('Edit camera', `
+  const hasRtspPw = c.rtsp_password ? true : false;
+  const hasXmeyePw = c.xmeye_password ? true : false;
+  res.send(layout('Edit camera', nav('cameras'), `
+    ${breadcrumb({ label: 'Cameras', href: '/admin' }, { label: escapeHtml(c.display_name) })}
     <h1>Edit camera</h1>
+    ${req.query.msg ? `<div class="admin-msg">${escapeHtml(req.query.msg)}</div>` : ''}
     <form method="post" action="/admin/cameras/${c.id}" class="admin-form">
-      <label>Display name <input type="text" name="display_name" value="${escapeHtml(c.display_name)}" required></label>
-      <label>Host / IP <input type="text" name="rtsp_host" value="${escapeHtml(c.rtsp_host)}" required></label>
-      <label>Port <input type="text" name="rtsp_port" value="${escapeHtml(String(c.rtsp_port || 554))}"></label>
-      <label>Username <input type="text" name="rtsp_username" value="${escapeHtml(c.rtsp_username)}" autocomplete="off"></label>
-      <label>Password <input type="password" name="rtsp_password" value="${escapeHtml(c.rtsp_password)}" autocomplete="off"></label>
-      <label>Path <input type="text" name="rtsp_path" value="${escapeHtml(c.rtsp_path)}"></label>
-      <button type="submit" class="btn btn-primary">Save</button>
-      <a href="/admin" class="btn btn-ghost">Cancel</a>
+      ${csrfField(req)}
+      <div class="form-section">
+        <p class="form-section-title">Display</p>
+        <label for="cam-name">Camera name</label>
+        <input type="text" id="cam-name" name="display_name" value="${escapeHtml(c.display_name)}" required>
+      </div>
+      <div class="form-section">
+        <p class="form-section-title">RTSP Connection</p>
+        <div class="form-row">
+          <div>
+            <label for="cam-host">Host / IP</label>
+            <input type="text" id="cam-host" name="rtsp_host" value="${escapeHtml(c.rtsp_host)}" required>
+          </div>
+          <div class="form-col-sm">
+            <label for="cam-port">Port</label>
+            <input type="text" id="cam-port" name="rtsp_port" value="${escapeHtml(String(c.rtsp_port || 554))}">
+          </div>
+        </div>
+        <label for="cam-path">Path</label>
+        <input type="text" id="cam-path" name="rtsp_path" value="${escapeHtml(c.rtsp_path)}">
+        <div class="form-row">
+          <div>
+            <label for="cam-user">Username</label>
+            <input type="text" id="cam-user" name="rtsp_username" value="${escapeHtml(c.rtsp_username)}" autocomplete="off">
+          </div>
+          <div>
+            <label for="cam-pass">Password</label>
+            <input type="password" id="cam-pass" name="rtsp_password" placeholder="${hasRtspPw ? '(unchanged)' : ''}" autocomplete="off">
+            <p class="field-hint">${hasRtspPw ? 'Leave blank to keep current password.' : 'No password set.'}</p>
+          </div>
+        </div>
+      </div>
+      <div class="form-section">
+        <p class="form-section-title">XMEye / Web access</p>
+        <label for="cam-xmeye">XMEye password</label>
+        <input type="password" id="cam-xmeye" name="xmeye_password" placeholder="${hasXmeyePw ? '(unchanged)' : 'Leave blank if same as RTSP'}" autocomplete="off">
+        <p class="field-hint">${hasXmeyePw ? 'Leave blank to keep current XMEye password.' : 'Only needed if different from RTSP password.'}</p>
+      </div>
+      <div class="form-actions">
+        <button type="submit" class="btn btn-primary">Save changes</button>
+        <a href="/admin" class="btn btn-ghost">Cancel</a>
+      </div>
     </form>
   `));
 });
 
-router.post('/cameras/:id', requireLogin, (req, res) => {
+router.post('/cameras/:id', requireLogin, verifyCsrf, (req, res) => {
   const id = Number(req.params.id);
   const c = db.getCamera(id);
   if (!c) return res.redirect('/admin');
-  const { display_name, rtsp_host, rtsp_port, rtsp_path, rtsp_username, rtsp_password } = req.body || {};
+  const { display_name, rtsp_host, rtsp_port, rtsp_path, rtsp_username, rtsp_password, xmeye_password } = req.body || {};
   if (!display_name || !rtsp_host) return res.redirect(`/admin/cameras/${id}/edit`);
   const port = parseInt(rtsp_port) || 554;
-  db.updateCamera(id, display_name.trim(), rtsp_host.trim(), port, (rtsp_path || '').trim(), (rtsp_username || '').trim(), (rtsp_password || '').trim());
-  streamManager.stopStream(id);
-  const updated = db.getCamera(id);
-  streamManager.startStream(id, updated.rtsp_url);
-  res.redirect('/admin');
+  const password = rtsp_password || c.rtsp_password;
+  const xmeyePw = xmeye_password || c.xmeye_password || '';
+  try {
+    db.updateCamera(id, display_name.trim(), rtsp_host.trim(), port, (rtsp_path || '').trim(), (rtsp_username || '').trim(), (password || '').trim(), xmeyePw.trim());
+    streamManager.stopStream(id);
+    const updated = db.getCamera(id);
+    streamManager.startStream(id, updated.rtsp_url);
+    res.redirect('/admin');
+  } catch (err) {
+    res.redirect(`/admin/cameras/${id}/edit?msg=` + encodeURIComponent(err.message));
+  }
 });
 
-router.post('/cameras/:id/delete', requireLogin, (req, res) => {
+router.post('/cameras/:id/delete', requireLogin, verifyCsrf, (req, res) => {
   const id = Number(req.params.id);
   if (db.getCamera(id)) {
     streamManager.stopStream(id);
@@ -255,50 +415,70 @@ router.post('/cameras/:id/delete', requireLogin, (req, res) => {
 });
 
 // --- Users ---
+
 router.get('/users', requireLogin, (req, res) => {
   const users = db.listUsers();
-  const rows = users.map((u) => {
-    const isSelf = req.session.userId === u.id;
-    const canDelete = db.countUsers() > 1 && !isSelf;
-    return `
-      <tr>
-        <td>${escapeHtml(u.username)}</td>
-        <td>${escapeHtml(u.created_at)}</td>
-        <td>
-          <a href="/admin/users/${u.id}/edit" class="btn btn-small">Change password</a>
-          ${canDelete ? `
-          <form method="post" action="/admin/users/${u.id}/delete" style="display:inline" onsubmit="return confirm('Delete user ${escapeHtml(u.username)}?');">
-            <button type="submit" class="btn btn-small btn-danger">Delete</button>
-          </form>
-          ` : ''}
-        </td>
-      </tr>`;
-  }).join('');
-  res.send(layout('Users', `
-    <h1>Users</h1>
-    <p><a href="/admin/users/new" class="btn btn-primary">Add user</a></p>
-    <table class="admin-table">
-      <thead><tr><th>Username</th><th>Created</th><th>Actions</th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="3">No users.</td></tr>'}</tbody>
-    </table>
-    <p><a href="/admin" class="btn btn-ghost">Back to dashboard</a></p>
+  let userContent;
+  if (users.length) {
+    const rows = users.map((u) => {
+      const isSelf = req.session.userId === u.id;
+      const canDelete = db.countUsers() > 1 && !isSelf;
+      return `
+        <tr>
+          <td><strong>${escapeHtml(u.username)}</strong>${isSelf ? ' <span style="color:#3182ce;font-size:0.8rem;">(you)</span>' : ''}</td>
+          <td>${friendlyDate(u.created_at)}</td>
+          <td>
+            <a href="/admin/users/${u.id}/edit" class="btn btn-small">Change password</a>
+            ${canDelete ? `
+            <form method="post" action="/admin/users/${u.id}/delete" style="display:inline" onsubmit="return confirm('Delete user &quot;${escapeHtml(u.username)}&quot;?');">
+              ${csrfField(req)}
+              <button type="submit" class="btn btn-small btn-danger">Delete</button>
+            </form>
+            ` : ''}
+          </td>
+        </tr>`;
+    }).join('');
+    userContent = `
+      <table class="admin-table">
+        <thead><tr><th>Username</th><th>Created</th><th>Actions</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+  } else {
+    userContent = `
+      <div class="empty-state">
+        <div class="empty-state-icon">&#x1F465;</div>
+        <p class="empty-state-text">No users found.</p>
+      </div>`;
+  }
+  res.send(layout('Users', nav('users'), `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;">
+      <h1 style="margin:0">Users</h1>
+      <a href="/admin/users/new" class="btn btn-primary btn-small">+ Add user</a>
+    </div>
+    ${userContent}
   `));
 });
 
 router.get('/users/new', requireLogin, (req, res) => {
-  res.send(layout('Add user', `
+  res.send(layout('Add user', nav('users'), `
+    ${breadcrumb({ label: 'Users', href: '/admin/users' }, { label: 'Add user' })}
     <h1>Add user</h1>
-    ${req.query.msg ? `<p class="admin-msg">${escapeHtml(req.query.msg)}</p>` : ''}
+    ${req.query.msg ? `<div class="admin-msg">${escapeHtml(req.query.msg)}</div>` : ''}
     <form method="post" action="/admin/users" class="admin-form">
-      <label>Username <input type="text" name="username" required autofocus></label>
-      <label>Password <input type="password" name="password" required minlength="6"></label>
-      <button type="submit" class="btn btn-primary">Add user</button>
-      <a href="/admin/users" class="btn btn-ghost">Cancel</a>
+      ${csrfField(req)}
+      <label for="new-user">Username</label>
+      <input type="text" id="new-user" name="username" required autofocus placeholder="Enter username">
+      <label for="new-pw">Password</label>
+      <input type="password" id="new-pw" name="password" required minlength="6" placeholder="Min. 6 characters">
+      <div class="form-actions">
+        <button type="submit" class="btn btn-primary">Add user</button>
+        <a href="/admin/users" class="btn btn-ghost">Cancel</a>
+      </div>
     </form>
   `));
 });
 
-router.post('/users', requireLogin, (req, res) => {
+router.post('/users', requireLogin, verifyCsrf, (req, res) => {
   const { username, password } = req.body || {};
   if (!username || !password || password.length < 6) return res.redirect('/admin/users/new');
   const trimmed = username.trim();
@@ -313,17 +493,23 @@ router.get('/users/:id/edit', requireLogin, (req, res) => {
   const id = Number(req.params.id);
   const u = db.getUser(id);
   if (!u) return res.redirect('/admin/users');
-  res.send(layout('Change password', `
-    <h1>Change password: ${escapeHtml(u.username)}</h1>
+  res.send(layout('Change password', nav('users'), `
+    ${breadcrumb({ label: 'Users', href: '/admin/users' }, { label: escapeHtml(u.username) })}
+    <h1>Change password</h1>
+    <p style="color:#718096;margin-bottom:1rem;">Updating password for <strong>${escapeHtml(u.username)}</strong></p>
     <form method="post" action="/admin/users/${id}" class="admin-form">
-      <label>New password <input type="password" name="password" required minlength="6"></label>
-      <button type="submit" class="btn btn-primary">Update password</button>
-      <a href="/admin/users" class="btn btn-ghost">Cancel</a>
+      ${csrfField(req)}
+      <label for="edit-pw">New password</label>
+      <input type="password" id="edit-pw" name="password" required minlength="6" placeholder="Min. 6 characters">
+      <div class="form-actions">
+        <button type="submit" class="btn btn-primary">Update password</button>
+        <a href="/admin/users" class="btn btn-ghost">Cancel</a>
+      </div>
     </form>
   `));
 });
 
-router.post('/users/:id', requireLogin, (req, res) => {
+router.post('/users/:id', requireLogin, verifyCsrf, (req, res) => {
   const id = Number(req.params.id);
   if (!db.getUser(id)) return res.redirect('/admin/users');
   const password = (req.body || {}).password;
@@ -332,7 +518,7 @@ router.post('/users/:id', requireLogin, (req, res) => {
   res.redirect('/admin/users');
 });
 
-router.post('/users/:id/delete', requireLogin, (req, res) => {
+router.post('/users/:id/delete', requireLogin, verifyCsrf, (req, res) => {
   const id = Number(req.params.id);
   if (db.countUsers() <= 1) return res.redirect('/admin/users');
   if (!db.getUser(id)) return res.redirect('/admin/users');
@@ -344,29 +530,67 @@ router.post('/users/:id/delete', requireLogin, (req, res) => {
   res.redirect('/admin/users');
 });
 
-// --- Debug info API ---
+// --- Settings ---
+
+router.get('/settings', requireLogin, (req, res) => {
+  const settings = db.getAllSettings();
+  const reverseProxy = settings.reverse_proxy === 'true';
+  const requireAuth = settings.require_auth_streams === 'true';
+  res.send(layout('Settings', nav('settings'), `
+    <h1>Settings</h1>
+    ${req.query.msg ? `<div class="admin-msg admin-msg-ok">${escapeHtml(req.query.msg)}</div>` : ''}
+    <form method="post" action="/admin/settings" class="admin-form">
+      ${csrfField(req)}
+      <fieldset class="settings-group">
+        <legend>Network / Proxy</legend>
+        <label class="checkbox-label">
+          <input type="checkbox" name="reverse_proxy" value="true" ${reverseProxy ? 'checked' : ''}>
+          Behind a reverse proxy (nginx, Caddy, Traefik)
+        </label>
+        <p class="field-hint">
+          Enable this if Birdcam is behind nginx or another reverse proxy that handles HTTPS/TLS.
+          This sets <code>trust proxy</code>, enables <code>Secure</code> cookies, and trusts
+          <code>X-Forwarded-*</code> headers from the proxy.
+          <strong>Do NOT enable this if the app is directly exposed to the internet.</strong>
+        </p>
+      </fieldset>
+      <fieldset class="settings-group">
+        <legend>Stream Access</legend>
+        <label class="checkbox-label">
+          <input type="checkbox" name="require_auth_streams" value="true" ${requireAuth ? 'checked' : ''}>
+          Require login to view camera streams
+        </label>
+        <p class="field-hint">
+          When enabled, the HLS video streams (<code>/hls/*</code>) require an authenticated session.
+          When disabled, anyone with the URL can view the streams (public access).
+        </p>
+      </fieldset>
+      <div class="form-actions">
+        <button type="submit" class="btn btn-primary">Save settings</button>
+        <a href="/admin" class="btn btn-ghost">Cancel</a>
+      </div>
+    </form>
+  `));
+});
+
+router.post('/settings', requireLogin, verifyCsrf, (req, res) => {
+  db.setSetting('reverse_proxy', req.body.reverse_proxy === 'true' ? 'true' : 'false');
+  db.setSetting('require_auth_streams', req.body.require_auth_streams === 'true' ? 'true' : 'false');
+  res.redirect('/admin/settings?msg=Settings+saved');
+});
+
+// --- Debug info API (reduced info for security) ---
+
 router.get('/api/debug-info', requireLogin, (req, res) => {
   const cameras = db.listCameras();
-  const safeEnv = {};
-  const showKeys = ['NODE_ENV', 'PORT', 'ADMIN_USER'];
-  for (const k of showKeys) {
-    if (process.env[k]) safeEnv[k] = process.env[k];
-  }
-  safeEnv['SESSION_SECRET'] = process.env.SESSION_SECRET ? '(set)' : '(default)';
   const uptimeSec = process.uptime();
   const h = Math.floor(uptimeSec / 3600);
   const m = Math.floor((uptimeSec % 3600) / 60);
   const s = Math.floor(uptimeSec % 60);
   res.json({
-    buildTime: BUILD_TIME,
     uptime: `${h}h ${m}m ${s}s`,
     nodeVersion: process.version,
-    platform: os.platform(),
-    arch: os.arch(),
-    hostname: os.hostname(),
     memoryMB: (process.memoryUsage().rss / 1024 / 1024).toFixed(1),
-    freeMemMB: (os.freemem() / 1024 / 1024).toFixed(0),
-    env: safeEnv,
     cameras: cameras.map(c => ({
       id: c.id,
       name: c.display_name,
@@ -378,6 +602,7 @@ router.get('/api/debug-info', requireLogin, (req, res) => {
 });
 
 // --- Debug log API ---
+
 router.get('/api/logs', requireLogin, (req, res) => {
   res.json(streamManager.getAllLogs());
 });
@@ -388,12 +613,14 @@ router.get('/api/logs/:id', requireLogin, (req, res) => {
 });
 
 // --- Debug page ---
+
 router.get('/debug', requireLogin, (req, res) => {
   const cameras = db.listCameras();
   const options = cameras.map(c =>
     `<option value="${c.id}">${escapeHtml(c.display_name)} (cam-${c.id})</option>`
   ).join('');
-  res.send(layout('Debug', `
+  res.send(layout('Debug', nav('cameras'), `
+    ${breadcrumb({ label: 'Cameras', href: '/admin' }, { label: 'Debug Logs' })}
     <h1>Debug Logs</h1>
     <div class="debug-controls">
       <select id="cam-select" class="debug-select">
@@ -405,7 +632,6 @@ router.get('/debug', requireLogin, (req, res) => {
       <button type="button" class="btn btn-small" id="clear-log">Clear</button>
     </div>
     <pre id="log-output" class="debug-log"></pre>
-    <p><a href="/admin" class="btn btn-ghost">Back to dashboard</a></p>
     <script>
     (function() {
       const logEl = document.getElementById('log-output');

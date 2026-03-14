@@ -14,8 +14,30 @@
     <header class="header">
       <h1 class="logo">Birdcam Live</h1>
       <span class="live-pill">Live</span>
+      <button type="button" id="rec-toggle" class="rec-toggle-btn">📼 Recordings</button>
       <a href="/admin" class="admin-link">Admin</a>
     </header>
+
+    <div class="stats-strip" id="stats-strip">
+      <div class="stats-streams" id="stats-streams" title="Which cameras are live right now">
+        <span class="stats-label">Live now</span>
+        <span class="stats-streams-list" id="stats-streams-list">—</span>
+      </div>
+      <div class="stat-item" id="stat-viewers" title="People watching right now">
+        <span class="stat-icon" aria-hidden="true">👀</span>
+        <span class="stat-value" id="stat-viewers-value">—</span>
+        <span class="stat-label">people watching</span>
+      </div>
+      <div class="stat-item" id="stat-messages" title="Total messages in the chat">
+        <span class="stat-icon" aria-hidden="true">💬</span>
+        <span class="stat-value" id="stat-messages-value">—</span>
+        <span class="stat-label">messages in chat</span>
+      </div>
+      <div class="stat-item stat-last-visit" id="stat-last-visit" title="We remember when you were here last">
+        <span class="stat-icon" aria-hidden="true">🕐</span>
+        <span class="stat-value stat-last-visit-text" id="stat-last-visit-value">First time here?</span>
+      </div>
+    </div>
 
     <div class="main">
       <section class="video-section">
@@ -29,6 +51,16 @@
           <div class="info-panel hidden" id="info-panel"></div>
         </div>
       </section>
+
+      <aside class="recordings-panel hidden" id="recordings-panel">
+        <h2 class="chat-title">Recordings</h2>
+        <div class="recordings-controls">
+          <input type="date" id="rec-date" class="rec-date-input">
+          <select id="rec-camera" class="rec-camera-select"></select>
+          <button type="button" id="rec-search" class="btn-rec-search">Search</button>
+        </div>
+        <div class="rec-list" id="rec-list"><p class="rec-empty">Pick a date and camera, then press Search.</p></div>
+      </aside>
 
       <aside class="chat-section">
         <h2 class="chat-title">Chat</h2>
@@ -45,7 +77,7 @@
       </aside>
     </div>
   </div>
-  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.7"></script>
+  <script src="vendor/hls.min.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

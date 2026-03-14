@@ -1,5 +1,7 @@
 (function () {
   const NICKNAME_KEY = 'birdcam_nickname';
+  const LAST_VISIT_KEY = 'birdcam_last_visit';
+  const STATS_POLL_INTERVAL = 8000;
 
   const video = document.getElementById('video');
   const videoOverlay = document.getElementById('video-overlay');
@@ -98,6 +100,8 @@
           data.messages.forEach((m) => appendMessage(m));
         } else if (data.type === 'message' && data.nickname && data.text) {
           appendMessage(data);
+        } else if (data.type === 'stats') {
+          updateStatsFromPayload(data);
         }
       } catch (_) {}
     };
@@ -207,4 +211,182 @@
   } catch (_) {}
 
   connectWs();
+
+  // --- Stats strip ---
+  const statsStreamsList = document.getElementById('stats-streams-list');
+  const statViewersValue = document.getElementById('stat-viewers-value');
+  const statMessagesValue = document.getElementById('stat-messages-value');
+  const statLastVisitValue = document.getElementById('stat-last-visit-value');
+  let statsState = { viewerCount: null, totalChatMessages: null, streams: [] };
+
+  function formatLastVisit(isoString) {
+    if (!isoString) return 'First time here?';
+    const then = new Date(isoString);
+    const now = new Date();
+    const sameDay = then.toDateString() === now.toDateString();
+    const yesterday = new Date(now);
+    yesterday.setDate(yesterday.getDate() - 1);
+    const wasYesterday = then.toDateString() === yesterday.toDateString();
+    const timeStr = then.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    if (sameDay) return 'Your last visit: Today at ' + timeStr;
+    if (wasYesterday) return 'Your last visit: Yesterday at ' + timeStr;
+    return 'Your last visit: ' + then.toLocaleDateString() + ' at ' + timeStr;
+  }
+
+  function updateLastVisit() {
+    const last = (function () { try { return localStorage.getItem(LAST_VISIT_KEY); } catch (_) { return null; } })();
+    statLastVisitValue.textContent = formatLastVisit(last);
+    try {
+      localStorage.setItem(LAST_VISIT_KEY, new Date().toISOString());
+    } catch (_) {}
+  }
+
+  function bump(el) {
+    if (!el) return;
+    el.classList.remove('stat-bump');
+    el.offsetHeight;
+    el.classList.add('stat-bump');
+    setTimeout(function () { el.classList.remove('stat-bump'); }, 400);
+  }
+
+  function renderStats() {
+    const s = statsState;
+    if (s.streams && s.streams.length) {
+      statsStreamsList.innerHTML = s.streams.map((st) =>
+        st.live
+          ? '<span class="stream-pill stream-pill-live">' + escapeHtml(st.display_name) + '</span>'
+          : '<span class="stream-pill stream-pill-off">' + escapeHtml(st.display_name) + '</span>'
+      ).join(' ');
+    } else if (s.streams && s.streams.length === 0) {
+      statsStreamsList.textContent = '—';
+    }
+    if (s.viewerCount !== null) {
+      const prev = statViewersValue.textContent;
+      statViewersValue.textContent = s.viewerCount;
+      if (prev !== '' && prev !== '—' && Number(prev) !== s.viewerCount) bump(statViewersValue);
+    }
+    if (s.totalChatMessages !== null) {
+      const prev = statMessagesValue.textContent;
+      statMessagesValue.textContent = s.totalChatMessages;
+      if (prev !== '' && prev !== '—' && Number(prev) !== s.totalChatMessages) bump(statMessagesValue);
+    }
+  }
+
+  function updateStatsFromPayload(data) {
+    if (data.viewerCount !== undefined) statsState.viewerCount = data.viewerCount;
+    if (data.totalChatMessages !== undefined) statsState.totalChatMessages = data.totalChatMessages;
+    renderStats();
+  }
+
+  function fetchStats() {
+    fetch('/api/stats')
+      .then((r) => r.json())
+      .then((data) => {
+        statsState = {
+          viewerCount: data.viewerCount,
+          totalChatMessages: data.totalChatMessages,
+          streams: data.streams || [],
+        };
+        renderStats();
+      })
+      .catch(() => {});
+  }
+
+  updateLastVisit();
+  fetchStats();
+  setInterval(fetchStats, STATS_POLL_INTERVAL);
+
+  // --- Recordings panel ---
+  const recToggle = document.getElementById('rec-toggle');
+  const recPanel = document.getElementById('recordings-panel');
+  const recDate = document.getElementById('rec-date');
+  const recCamera = document.getElementById('rec-camera');
+  const recSearch = document.getElementById('rec-search');
+  const recList = document.getElementById('rec-list');
+  let currentPlaybackKey = null;
+
+  // Default date to today
+  recDate.value = new Date().toISOString().slice(0, 10);
+
+  function populateRecCameras() {
+    recCamera.innerHTML = cameras.map((c) => `<option value="${c.id}">${escapeHtml(c.display_name)}</option>`).join('');
+  }
+
+  recToggle.addEventListener('click', () => {
+    const isOpen = !recPanel.classList.contains('hidden');
+    recPanel.classList.toggle('hidden', isOpen);
+    recToggle.classList.toggle('active', !isOpen);
+    if (!isOpen) populateRecCameras();
+  });
+
+  recSearch.addEventListener('click', () => {
+    const camId = recCamera.value;
+    const date = recDate.value;
+    if (!camId || !date) return;
+    recList.innerHTML = '<p class="rec-empty">Searching…</p>';
+    fetch(`/api/recordings/${camId}?date=${date}`)
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.error) { recList.innerHTML = `<p class="rec-error">${escapeHtml(data.error)}</p>`; return; }
+        if (!data.clips || !data.clips.length) { recList.innerHTML = '<p class="rec-empty">No recordings found for this date.</p>'; return; }
+        recList.innerHTML = '';
+        data.clips.forEach((clip) => {
+          const div = document.createElement('div');
+          div.className = 'rec-clip';
+          const dur = clip.durationSec >= 60
+            ? `${Math.floor(clip.durationSec / 60)}m ${clip.durationSec % 60}s`
+            : `${clip.durationSec}s`;
+          div.innerHTML = `
+            <div class="rec-clip-info">
+              <span class="rec-time">${escapeHtml(clip.startTime.slice(11, 19))}</span>
+              <span class="rec-dur">${dur}</span>
+              <span class="rec-size">${clip.sizeMB} MB</span>
+            </div>
+            <button class="btn-play-clip" data-start="${escapeHtml(clip.startTime)}" data-end="${escapeHtml(clip.endTime)}" data-cam="${camId}">▶ Play</button>
+          `;
+          recList.appendChild(div);
+        });
+        recList.querySelectorAll('.btn-play-clip').forEach((btn) => {
+          btn.addEventListener('click', () => playClip(btn.dataset.cam, btn.dataset.start, btn.dataset.end, btn));
+        });
+      })
+      .catch(() => { recList.innerHTML = '<p class="rec-error">Failed to fetch recordings.</p>'; });
+  });
+
+  function playClip(camId, startTime, endTime, btn) {
+    btn.textContent = '⏳ Loading…';
+    btn.disabled = true;
+    // Stop previous playback session
+    if (currentPlaybackKey) {
+      fetch(`/api/recordings/stream/${currentPlaybackKey}`, { method: 'DELETE' }).catch(() => {});
+      currentPlaybackKey = null;
+    }
+    fetch(`/api/recordings/${camId}/stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ startTime, endTime }),
+    })
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.error) { btn.textContent = '✗ Error'; btn.disabled = false; return; }
+        currentPlaybackKey = data.key;
+        // Load the playback HLS stream into the main video player
+        destroyHls();
+        videoOverlay.classList.add('hidden');
+        if (Hls.isSupported()) {
+          hls = new Hls({ enableWorker: true });
+          hls.loadSource(data.hlsUrl);
+          hls.attachMedia(video);
+          hls.on(Hls.Events.MANIFEST_PARSED, () => { videoOverlay.classList.add('hidden'); });
+          hls.on(Hls.Events.ERROR, (_, d) => {
+            if (d.fatal) { videoOverlay.classList.remove('hidden'); videoOverlay.querySelector('p').textContent = 'Playback error.'; }
+          });
+        } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+          video.src = data.hlsUrl;
+        }
+        btn.textContent = '▶ Playing';
+        btn.disabled = false;
+      })
+      .catch(() => { btn.textContent = '✗ Error'; btn.disabled = false; });
+  }
 })();
