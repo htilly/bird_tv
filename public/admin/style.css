@@ -389,6 +389,70 @@
 .debug-table { font-size: 0.85rem; }
 .debug-table td:first-child { font-weight: 500; color: #4a5568; white-space: nowrap; width: 40%; }
 
+/* --- Visitor stats --- */
+.visitors-desc {
+  margin: 0 0 1.25rem;
+  font-size: 0.95rem;
+  color: #718096;
+}
+
+.visitor-stats-cards {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1rem;
+  margin-bottom: 2rem;
+}
+
+.visitor-card {
+  background: linear-gradient(145deg, #f0fff4 0%, #c6f6d5 100%);
+  border: 2px solid rgba(72, 187, 120, 0.4);
+  border-radius: 14px;
+  padding: 1.25rem;
+  text-align: center;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+
+.visitor-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 14px rgba(0,0,0,0.08);
+}
+
+.visitor-card-value {
+  display: block;
+  font-size: 2rem;
+  font-weight: 800;
+  color: #276749;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+}
+
+.visitor-card-label {
+  display: block;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #2f855a;
+  margin-top: 0.35rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.visitor-chart-wrap {
+  margin-top: 0.5rem;
+}
+
+.visitor-chart-wrap h2 {
+  font-size: 1rem;
+  font-weight: 600;
+  color: #4a5568;
+  margin: 0 0 1rem;
+}
+
+#visitor-chart {
+  max-width: 100%;
+  height: auto;
+}
+
 /* --- Responsive --- */
 @media (max-width: 600px) {
   .admin-wrap { padding: 0.5rem; }
@@ -405,4 +469,78 @@
   .camera-card { flex-direction: column; align-items: stretch; gap: 0.6rem; }
   .camera-card-actions { justify-content: flex-end; }
   .login-box { margin-top: 1rem; }
+  .visitor-stats-cards { grid-template-columns: 1fr; gap: 0.75rem; margin-bottom: 1.5rem; }
+  .visitor-card-value { font-size: 1.6rem; }
+}
+
+/* --- Snapshots admin --- */
+.snap-admin-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 1rem;
+  margin-top: 1rem;
+}
+.snap-admin-card {
+  background: #fff;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 2px solid #e2e8f0;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+  display: flex;
+  flex-direction: column;
+  transition: box-shadow 0.15s;
+}
+.snap-admin-card:hover {
+  box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+}
+.snap-admin-card.starred {
+  border-color: #ecc94b;
+  box-shadow: 0 0 0 3px rgba(236,201,75,0.3);
+}
+.snap-admin-thumb-link {
+  display: block;
+  position: relative;
+}
+.snap-admin-thumb {
+  width: 100%;
+  aspect-ratio: 4/3;
+  object-fit: cover;
+  display: block;
+}
+.snap-admin-starred-badge {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  background: rgba(0,0,0,0.6);
+  color: #ecc94b;
+  font-size: 0.75rem;
+  padding: 0.15rem 0.4rem;
+  border-radius: 4px;
+  font-weight: 600;
+}
+.snap-admin-meta {
+  padding: 0.5rem 0.6rem;
+  flex: 1;
+}
+.snap-admin-nick {
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: #2d3748;
+}
+.snap-admin-cam {
+  font-size: 0.75rem;
+  color: #718096;
+  margin-top: 0.1rem;
+}
+.snap-admin-time {
+  font-size: 0.7rem;
+  color: #a0aec0;
+  margin-top: 0.1rem;
+}
+.snap-admin-actions {
+  padding: 0.4rem 0.6rem;
+  display: flex;
+  gap: 0.4rem;
+  border-top: 1px solid #e2e8f0;
+  background: #f7fafc;
 }

@@ -105,8 +105,8 @@
           appendMessage(data);
         } else if (data.type === 'stats') {
           updateStatsFromPayload(data);
-        } else if (data.type === 'snapshots' && Array.isArray(data.snapshots)) {
-          renderSnapshots(data.snapshots);
+        } else if (data.type === 'snapshots') {
+          renderSnapshots(data.latest || [], data.starred || null);
         }
       } catch (_) {}
     };
@@ -313,27 +313,47 @@
   const snapLightboxClose = document.getElementById('snap-lightbox-close');
   const snapLightboxBg = snapLightbox.querySelector('.snap-lightbox-bg');
 
-  function renderSnapshots(snaps) {
+  function makeSnapThumb(s, isStarred) {
+    const thumb = document.createElement('div');
+    thumb.className = 'snap-thumb' + (isStarred ? ' snap-thumb--starred' : '');
+    const img = document.createElement('img');
+    img.src = s.url;
+    img.alt = 'Snapshot by ' + s.nickname;
+    if (isStarred) {
+      const badge = document.createElement('span');
+      badge.className = 'snap-star-badge';
+      badge.textContent = '\u2B50';
+      thumb.appendChild(badge);
+    }
+    const cap = document.createElement('div');
+    cap.className = 'snap-thumb-caption';
+    const t = new Date(s.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    cap.textContent = s.nickname + ' \u00B7 ' + t;
+    thumb.appendChild(img);
+    thumb.appendChild(cap);
+    thumb.addEventListener('click', () => openLightbox(s));
+    return thumb;
+  }
+
+  function renderSnapshots(snaps, starred) {
     snapStrip.innerHTML = '';
-    if (!snaps || !snaps.length) return;
-    snaps.forEach(s => {
-      const thumb = document.createElement('div');
-      thumb.className = 'snap-thumb';
-      const img = document.createElement('img');
-      img.src = s.url;
-      img.alt = 'Snapshot by ' + s.nickname;
-      const cap = document.createElement('div');
-      cap.className = 'snap-thumb-caption';
-      const t = new Date(s.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      cap.textContent = s.nickname + ' · ' + t;
-      thumb.appendChild(img);
-      thumb.appendChild(cap);
-      thumb.addEventListener('click', () => openLightbox(s));
-      snapStrip.appendChild(thumb);
-    });
+    const hasStarred = starred && starred.id;
+    const hasLatest = snaps && snaps.length;
+    if (!hasStarred && !hasLatest) return;
+
+    if (hasStarred) {
+      snapStrip.appendChild(makeSnapThumb(starred, true));
+    }
+    if (hasLatest) {
+      snaps.forEach(s => {
+        // Don't duplicate the starred snap if it's also in latest
+        if (hasStarred && s.id === starred.id) return;
+        snapStrip.appendChild(makeSnapThumb(s, false));
+      });
+    }
     const label = document.createElement('span');
     label.className = 'snap-strip-label';
-    label.textContent = '📷 Latest snaps';
+    label.textContent = '\uD83D\uDCF7 Latest snaps';
     snapStrip.appendChild(label);
   }
 
@@ -350,7 +370,7 @@
   document.addEventListener('keydown', e => { if (e.key === 'Escape') closeLightbox(); });
 
   // Load initial snapshots
-  fetch('/api/snapshots').then(r => r.json()).then(renderSnapshots).catch(() => {});
+  fetch('/api/snapshots').then(r => r.json()).then(d => renderSnapshots(d.latest || [], d.starred || null)).catch(() => {});
 
   // Handle snapshots pushed over WS
   // (hooked into the existing ws.onmessage handler)

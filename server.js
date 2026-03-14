@@ -166,23 +166,43 @@ const snapshotDir = path.join(__dirname, 'data', 'snapshots');
 fs.mkdirSync(snapshotDir, { recursive: true });
 app.use('/snapshots', express.static(snapshotDir));
 
-const snapshotLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 6,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: 'Too many snapshots. Please wait a moment.',
-});
+let _snapshotLimiter = null;
+let _snapshotLimiterKey = '';
+function getSnapshotLimiter() {
+  const max = parseInt(db.getSetting('snapshot_rate_max')) || 6;
+  const windowSec = parseInt(db.getSetting('snapshot_rate_window_sec')) || 60;
+  const key = `${max}:${windowSec}`;
+  if (_snapshotLimiter && _snapshotLimiterKey === key) return _snapshotLimiter;
+  _snapshotLimiterKey = key;
+  _snapshotLimiter = rateLimit({
+    windowMs: windowSec * 1000,
+    max,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: 'Too many snapshots. Please wait a moment.',
+  });
+  return _snapshotLimiter;
+}
 
-app.get('/api/snapshots', (req, res) => {
-  const snaps = db.getLatestSnapshots(3).map(s => ({
+function buildSnapshotsPayload() {
+  const starred = db.getStarredSnapshot();
+  const latest = db.getLatestSnapshots(3);
+  const toObj = s => ({
     id: s.id,
     url: `/snapshots/${s.filename}`,
     nickname: s.nickname,
     camera_name: s.camera_name,
     created_at: s.created_at,
-  }));
-  res.json(snaps);
+    starred: s.starred === 1 || s.starred === true,
+  });
+  return {
+    starred: starred ? toObj(starred) : null,
+    latest: latest.map(toObj),
+  };
+}
+
+app.get('/api/snapshots', (req, res) => {
+  res.json(buildSnapshotsPayload());
 });
 
 const server = http.createServer(app);
@@ -257,7 +277,7 @@ wss.on('connection', (ws) => {
 });
 
 // --- Snapshot POST (after wss so we can broadcast) ---
-app.post('/api/snapshots', snapshotLimiter, (req, res) => {
+app.post('/api/snapshots', (req, res, next) => getSnapshotLimiter()(req, res, next), (req, res) => {
   const { image, nickname, cameraName } = req.body || {};
   if (!image || typeof image !== 'string') return res.status(400).json({ error: 'No image data' });
   const match = image.match(/^data:image\/png;base64,(.+)$/);
@@ -269,12 +289,9 @@ app.post('/api/snapshots', snapshotLimiter, (req, res) => {
   const nick = String(nickname || 'Guest').slice(0, 30).trim() || 'Guest';
   const cam = String(cameraName || '').slice(0, 60).trim();
   db.addSnapshot(filename, nick, cam);
-  const snaps = db.getLatestSnapshots(3).map(s => ({
-    id: s.id, url: `/snapshots/${s.filename}`,
-    nickname: s.nickname, camera_name: s.camera_name, created_at: s.created_at,
-  }));
+  const payload = buildSnapshotsPayload();
   wss.clients.forEach(client => {
-    if (client.readyState === 1) client.send(JSON.stringify({ type: 'snapshots', snapshots: snaps }));
+    if (client.readyState === 1) client.send(JSON.stringify({ type: 'snapshots', ...payload }));
   });
   res.json({ ok: true, url: `/snapshots/${filename}` });
 });

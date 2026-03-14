@@ -84,9 +84,16 @@ function migrate() {
         filename TEXT NOT NULL,
         nickname TEXT NOT NULL,
         camera_name TEXT NOT NULL DEFAULT '',
+        starred INTEGER NOT NULL DEFAULT 0,
         created_at TEXT DEFAULT (datetime('now'))
       );
     `);
+  } else {
+    // Add starred column if missing (upgrade from older schema)
+    const snapCols = d.prepare("PRAGMA table_info(snapshots)").all().map(c => c.name);
+    if (!snapCols.includes('starred')) {
+      d.exec(`ALTER TABLE snapshots ADD COLUMN starred INTEGER NOT NULL DEFAULT 0;`);
+    }
   }
 
   // Visitor tracking for admin stats
@@ -114,6 +121,8 @@ const DEFAULT_SETTINGS = {
   setup_rate_max: '10',
   chat_rate_limit: '5',
   chat_rate_window_ms: '1000',
+  snapshot_rate_max: '6',
+  snapshot_rate_window_sec: '60',
 };
 
 function getSetting(key) {
@@ -233,6 +242,10 @@ function deleteCamera(id) {
 }
 
 // --- Snapshots ---
+function getSnapshot(id) {
+  return getDb().prepare("SELECT * FROM snapshots WHERE id = ?").get(id);
+}
+
 function addSnapshot(filename, nickname, cameraName) {
   getDb().prepare("INSERT INTO snapshots (filename, nickname, camera_name) VALUES (?, ?, ?)").run(filename, nickname, cameraName || '');
 }
@@ -247,6 +260,21 @@ function getAllSnapshots(limit = 50) {
 
 function deleteSnapshot(id) {
   return getDb().prepare("DELETE FROM snapshots WHERE id = ?").run(id);
+}
+
+function setSnapshotStarred(id, starred) {
+  // Only one snapshot can be starred at a time
+  const d = getDb();
+  if (starred) {
+    d.prepare("UPDATE snapshots SET starred = 0").run();
+    d.prepare("UPDATE snapshots SET starred = 1 WHERE id = ?").run(id);
+  } else {
+    d.prepare("UPDATE snapshots SET starred = 0 WHERE id = ?").run(id);
+  }
+}
+
+function getStarredSnapshot() {
+  return getDb().prepare("SELECT * FROM snapshots WHERE starred = 1 LIMIT 1").get();
 }
 
 // --- Visitor stats ---
@@ -305,8 +333,11 @@ module.exports = {
   isReverseProxy,
   recordVisit,
   getVisitorStats,
+  getSnapshot,
   addSnapshot,
   getLatestSnapshots,
   getAllSnapshots,
   deleteSnapshot,
+  setSnapshotStarred,
+  getStarredSnapshot,
 };

@@ -1,5 +1,7 @@
 const express = require('express');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const os = require('os');
 const router = express.Router();
 const db = require('../db');
@@ -52,6 +54,8 @@ function verifyCsrf(req, res, next) {
 function nav(active) {
   const items = [
     { id: 'cameras', label: 'Cameras', icon: '&#x1F3A5;', href: '/admin' },
+    { id: 'snapshots', label: 'Snapshots', icon: '&#x1F4F7;', href: '/admin/snapshots' },
+    { id: 'visitors', label: 'Visitors', icon: '&#x1F4CA;', href: '/admin/visitors' },
     { id: 'users', label: 'Users', icon: '&#x1F465;', href: '/admin/users' },
     { id: 'settings', label: 'Settings', icon: '&#x2699;&#xFE0F;', href: '/admin/settings' },
   ];
@@ -533,6 +537,181 @@ router.post('/users/:id/delete', requireLogin, verifyCsrf, (req, res) => {
   res.redirect('/admin/users');
 });
 
+// --- Visitors (history graph + unique counts) ---
+router.get('/api/visitor-stats', requireLogin, (req, res) => {
+  res.json(db.getVisitorStats());
+});
+
+router.get('/visitors', requireLogin, (req, res) => {
+  res.send(layout('Visitors', nav('visitors'), `
+    ${breadcrumb({ href: '/admin/visitors', label: 'Visitors' })}
+    <h1>Visitor history</h1>
+    <p class="visitors-desc">Unique visitors to the live stream page (cookie-based).</p>
+
+    <div class="visitor-stats-cards">
+      <div class="visitor-card">
+        <span class="visitor-card-value" id="stat-today">—</span>
+        <span class="visitor-card-label">Unique today</span>
+      </div>
+      <div class="visitor-card">
+        <span class="visitor-card-value" id="stat-week">—</span>
+        <span class="visitor-card-label">Last 7 days</span>
+      </div>
+      <div class="visitor-card">
+        <span class="visitor-card-value" id="stat-month">—</span>
+        <span class="visitor-card-label">Last 30 days</span>
+      </div>
+    </div>
+
+    <div class="visitor-chart-wrap">
+      <h2>Unique visitors per day (last 30 days)</h2>
+      <canvas id="visitor-chart" width="800" height="280" role="img" aria-label="Line chart of unique visitors per day"></canvas>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.6/dist/chart.umd.min.js"></script>
+    <script>
+(function() {
+  function fmt(n) { return n >= 1000000 ? (n/1e6).toFixed(1) + 'M' : n >= 1000 ? (n/1000).toFixed(1) + 'k' : String(n); }
+  function load() {
+    fetch('/admin/api/visitor-stats')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        document.getElementById('stat-today').textContent = fmt(data.uniqueToday);
+        document.getElementById('stat-week').textContent = fmt(data.uniqueWeek);
+        document.getElementById('stat-month').textContent = fmt(data.uniqueMonth);
+
+        var daily = data.daily || [];
+        var last30 = [];
+        var d = new Date();
+        for (var i = 29; i >= 0; i--) {
+          var day = new Date(d);
+          day.setDate(day.getDate() - i);
+          var dateStr = day.toISOString().slice(0, 10);
+          var row = daily.find(function(r) { return r.date === dateStr; });
+          last30.push({ date: dateStr, count: row ? row.count : 0 });
+        }
+
+        var labels = last30.map(function(r) {
+          var d = new Date(r.date + 'T12:00:00');
+          return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+        });
+        var counts = last30.map(function(r) { return r.count; });
+
+        var ctx = document.getElementById('visitor-chart').getContext('2d');
+        if (window.visitorChart) window.visitorChart.destroy();
+        window.visitorChart = new Chart(ctx, {
+          type: 'line',
+          data: {
+            labels: labels,
+            datasets: [{
+              label: 'Unique visitors',
+              data: counts,
+              borderColor: 'rgb(74, 222, 128)',
+              backgroundColor: 'rgba(74, 222, 128, 0.15)',
+              fill: true,
+              tension: 0.3,
+              pointRadius: 4,
+              pointHoverRadius: 6
+            }]
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: true,
+            plugins: {
+              legend: { display: false }
+            },
+            scales: {
+              y: {
+                beginAtZero: true,
+                ticks: { precision: 0 }
+              }
+            }
+          }
+        });
+      })
+      .catch(function() {
+        document.getElementById('stat-today').textContent = '?';
+        document.getElementById('stat-week').textContent = '?';
+        document.getElementById('stat-month').textContent = '?';
+      });
+  }
+  load();
+})();
+    </script>
+  `));
+});
+
+// --- Snapshots admin ---
+
+router.get('/snapshots', requireLogin, (req, res) => {
+  const snaps = db.getAllSnapshots(100);
+  let content;
+  if (snaps.length) {
+    const cards = snaps.map((s) => {
+      const starClass = s.starred ? 'snap-admin-card starred' : 'snap-admin-card';
+      const starLabel = s.starred ? 'Unstar' : 'Star';
+      const starIcon = s.starred ? '&#x2B50;' : '&#x2606;';
+      return `
+        <div class="${starClass}">
+          <a href="/snapshots/${escapeHtml(s.filename)}" target="_blank" class="snap-admin-thumb-link">
+            <img src="/snapshots/${escapeHtml(s.filename)}" alt="Snapshot" class="snap-admin-thumb" loading="lazy">
+            ${s.starred ? '<span class="snap-admin-starred-badge">&#x2B50; Starred</span>' : ''}
+          </a>
+          <div class="snap-admin-meta">
+            <div class="snap-admin-nick">${escapeHtml(s.nickname)}</div>
+            <div class="snap-admin-cam">${escapeHtml(s.camera_name || '—')}</div>
+            <div class="snap-admin-time">${escapeHtml(s.created_at)}</div>
+          </div>
+          <div class="snap-admin-actions">
+            <form method="post" action="/admin/snapshots/${s.id}/star" style="display:inline">
+              ${csrfField(req)}
+              <input type="hidden" name="starred" value="${s.starred ? '0' : '1'}">
+              <button type="submit" class="btn btn-small ${s.starred ? 'btn-ghost' : ''}" title="${starLabel}">${starIcon} ${starLabel}</button>
+            </form>
+            <form method="post" action="/admin/snapshots/${s.id}/delete" style="display:inline" onsubmit="return confirm('Delete this snapshot?');">
+              ${csrfField(req)}
+              <button type="submit" class="btn btn-small btn-danger">Delete</button>
+            </form>
+          </div>
+        </div>`;
+    }).join('');
+    content = `
+      ${req.query.msg ? `<div class="admin-msg admin-msg-ok">${escapeHtml(req.query.msg)}</div>` : ''}
+      <div class="snap-admin-grid">${cards}</div>`;
+  } else {
+    content = `
+      <div class="empty-state">
+        <div class="empty-state-icon">&#x1F4F7;</div>
+        <p class="empty-state-text">No snapshots yet. Visitors can take snapshots from the live stream.</p>
+      </div>`;
+  }
+  res.send(layout('Snapshots', nav('snapshots'), `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;">
+      <h1 style="margin:0">Snapshots</h1>
+    </div>
+    <p class="visitors-desc">Star a snapshot to pin it above the latest three for all viewers. Only one snapshot can be starred at a time.</p>
+    ${content}
+  `));
+});
+
+router.post('/snapshots/:id/star', requireLogin, verifyCsrf, (req, res) => {
+  const id = Number(req.params.id);
+  const starred = (req.body || {}).starred === '1';
+  db.setSnapshotStarred(id, starred);
+  res.redirect('/admin/snapshots?msg=' + (starred ? 'Snapshot+starred' : 'Snapshot+unstarred'));
+});
+
+router.post('/snapshots/:id/delete', requireLogin, verifyCsrf, (req, res) => {
+  const id = Number(req.params.id);
+  const snap = db.getSnapshot(id);
+  if (snap) {
+    const filePath = path.join(__dirname, '..', 'data', 'snapshots', snap.filename);
+    try { fs.unlinkSync(filePath); } catch (_) {}
+    db.deleteSnapshot(id);
+  }
+  res.redirect('/admin/snapshots?msg=Snapshot+deleted');
+});
+
 // --- Settings ---
 
 router.get('/settings', requireLogin, (req, res) => {
@@ -545,6 +724,8 @@ router.get('/settings', requireLogin, (req, res) => {
   const setupRateMax = settings.setup_rate_max || '10';
   const chatRateLimit = settings.chat_rate_limit || '5';
   const chatRateWindow = settings.chat_rate_window_ms || '1000';
+  const snapRateMax = settings.snapshot_rate_max || '6';
+  const snapRateWindow = settings.snapshot_rate_window_sec || '60';
   res.send(layout('Settings', nav('settings'), `
     <h1>Settings</h1>
     ${req.query.msg ? `<div class="admin-msg admin-msg-ok">${escapeHtml(req.query.msg)}</div>` : ''}
@@ -622,6 +803,23 @@ router.get('/settings', requireLogin, (req, res) => {
         <p class="field-hint">
           Maximum chat messages per user within the time window (WebSocket).
           Default: 5 messages per 1000ms (1 second).
+        </p>
+      </fieldset>
+      <fieldset class="settings-group">
+        <legend>Snapshot Rate Limiting</legend>
+        <div class="form-row">
+          <div>
+            <label for="snap-rate-max">Max snapshots</label>
+            <input type="number" id="snap-rate-max" name="snapshot_rate_max" value="${escapeHtml(snapRateMax)}" min="1" max="100">
+          </div>
+          <div>
+            <label for="snap-rate-window">Window (seconds)</label>
+            <input type="number" id="snap-rate-window" name="snapshot_rate_window_sec" value="${escapeHtml(snapRateWindow)}" min="10" max="3600">
+          </div>
+        </div>
+        <p class="field-hint">
+          Maximum snapshots per IP within the time window.
+          Default: 6 snapshots per 60 seconds.
         </p>
       </fieldset>
       <div class="form-actions">
@@ -781,12 +979,16 @@ router.post('/settings', requireLogin, verifyCsrf, (req, res) => {
   const setupRateWindow = Math.max(1, Math.min(1440, parseInt(req.body.setup_rate_window_min) || 15));
   const chatRateLimit = Math.max(1, Math.min(100, parseInt(req.body.chat_rate_limit) || 5));
   const chatRateWindow = Math.max(100, Math.min(60000, parseInt(req.body.chat_rate_window_ms) || 1000));
+  const snapRateMax = Math.max(1, Math.min(100, parseInt(req.body.snapshot_rate_max) || 6));
+  const snapRateWindow = Math.max(10, Math.min(3600, parseInt(req.body.snapshot_rate_window_sec) || 60));
   db.setSetting('login_rate_max', String(loginRateMax));
   db.setSetting('login_rate_window_min', String(loginRateWindow));
   db.setSetting('setup_rate_max', String(setupRateMax));
   db.setSetting('setup_rate_window_min', String(setupRateWindow));
   db.setSetting('chat_rate_limit', String(chatRateLimit));
   db.setSetting('chat_rate_window_ms', String(chatRateWindow));
+  db.setSetting('snapshot_rate_max', String(snapRateMax));
+  db.setSetting('snapshot_rate_window_sec', String(snapRateWindow));
   res.redirect('/admin/settings?msg=Settings+saved');
 });
 
