@@ -64,8 +64,8 @@ body {
 }
 
 .logo-img {
-  width: 2.2rem;
-  height: 2.2rem;
+  height: 3rem;
+  width: auto;
   flex-shrink: 0;
   filter: drop-shadow(0 2px 4px rgba(0,0,0,0.15));
 }
