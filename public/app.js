@@ -188,52 +188,6 @@
     return el.innerHTML;
   }
 
-  // --- Stream info panel ---
-  const infoBtn = document.getElementById('info-btn');
-  const infoPanel = document.getElementById('info-panel');
-
-  infoBtn.addEventListener('click', () => {
-    const isHidden = infoPanel.classList.toggle('hidden');
-    if (!isHidden) updateInfoPanel();
-  });
-
-  function updateInfoPanel() {
-    const lines = [];
-    if (video.videoWidth && video.videoHeight) {
-      lines.push('Resolution: ' + video.videoWidth + 'x' + video.videoHeight);
-    }
-    if (!isNaN(video.duration) && isFinite(video.duration)) {
-      lines.push('Buffer: ' + video.duration.toFixed(1) + 's');
-    }
-    if (video.currentTime) {
-      lines.push('Position: ' + video.currentTime.toFixed(1) + 's');
-    }
-    if (hls) {
-      const level = hls.levels && hls.levels[hls.currentLevel];
-      if (level) {
-        if (level.codecSet) lines.push('Codecs: ' + level.codecSet);
-        else if (level.attrs && level.attrs.CODECS) lines.push('Codecs: ' + level.attrs.CODECS);
-        if (level.bitrate) lines.push('Bitrate: ' + (level.bitrate / 1000).toFixed(0) + ' kbps');
-        if (level.width && level.height) lines.push('Level: ' + level.width + 'x' + level.height);
-      }
-      if (hls.latency != null) lines.push('Latency: ' + hls.latency.toFixed(1) + 's');
-      lines.push('Dropped frames: ' + (video.getVideoPlaybackQuality ? video.getVideoPlaybackQuality().droppedVideoFrames : 'N/A'));
-    } else if (video.src) {
-      lines.push('Native HLS (Safari)');
-      if (video.getVideoPlaybackQuality) {
-        const q = video.getVideoPlaybackQuality();
-        lines.push('Dropped frames: ' + q.droppedVideoFrames);
-      }
-    }
-    if (!lines.length) lines.push('No stream active');
-    infoPanel.textContent = lines.join('\n');
-  }
-
-  // Refresh info panel if open
-  setInterval(() => {
-    if (!infoPanel.classList.contains('hidden')) updateInfoPanel();
-  }, 2000);
-
   // --- Fullscreen button ---
   const fullscreenBtn = document.getElementById('fullscreen-btn');
   const videoWrap = document.querySelector('.video-wrap');
