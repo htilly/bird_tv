@@ -72,12 +72,17 @@
       border-radius: 12px;
       padding: 2rem;
     }
+    .visitor-chart-wrap canvas {
+      max-width: 100%;
+      height: auto !important;
+    }
     .visitor-chart-wrap h2 {
       font-family: 'Fredoka', sans-serif;
       font-size: 1.5rem;
       font-weight: 600;
       color: var(--text);
       margin: 0 0 1.5rem 0;
+      text-align: center;
     }
     @media (max-width: 900px) {
       .visitors-main {
@@ -140,10 +145,7 @@
         Birdcam Live
       </a>
       <span class="live-pill">Live</span>
-      <div class="admin-link-wrap">
-        <a href="/admin" class="admin-link">Admin</a>
-        <span class="build-number" id="build-number"></span>
-      </div>
+      <span class="build-number" id="build-number" style="margin-left: auto;"></span>
     </header>
 
     <main class="visitors-main">
