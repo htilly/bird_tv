@@ -5,7 +5,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "init-db": "node -e \"require('./db').init()\""
+    "init-db": "node -e \"require('./db').init()\"",
+    "test": "node --test test/*.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

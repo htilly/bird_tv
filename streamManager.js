@@ -51,7 +51,11 @@ function parseFfmpegOptions(camera) {
 }
 
 function pushOpt(args, key, value) {
-  if (value === undefined || value === null || value === '') return;
+  if (value === undefined || value === null) {
+    args.push(key);
+    return;
+  }
+  if (value === '') return;
   args.push(key);
   const s = String(value);
   if (s !== '') args.push(s);
@@ -237,4 +241,5 @@ module.exports = {
   hlsDir,
   DEFAULT_FFMPEG_OPTIONS,
   parseFfmpegOptions,
+  buildFfmpegArgs,
 };
