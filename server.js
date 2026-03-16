@@ -135,6 +135,46 @@ app.get('/api/cameras', (req, res) => {
   res.json(cameras);
 });
 
+// Public visitors stats page (no admin login required)
+app.get('/visitors', (req, res) => {
+  const stats = db.getVisitorStats();
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Visitors – Birdcam Live</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body class="admin">
+  <div class="admin-wrap">
+    <header class="admin-header">
+      <a href="/">Birdcam Live</a>
+      <a href="/admin" class="btn btn-ghost">Admin</a>
+    </header>
+    <main class="admin-main">
+      <h1>Visitors</h1>
+      <p class="visitors-desc">Unique visitors to the live stream page (cookie-based).</p>
+      <div class="visitor-stats-cards">
+        <div class="visitor-card">
+          <span class="visitor-card-value">${stats.uniqueToday}</span>
+          <span class="visitor-card-label">Unique today</span>
+        </div>
+        <div class="visitor-card">
+          <span class="visitor-card-value">${stats.uniqueWeek}</span>
+          <span class="visitor-card-label">Last 7 days</span>
+        </div>
+        <div class="visitor-card">
+          <span class="visitor-card-value">${stats.uniqueMonth}</span>
+          <span class="visitor-card-label">Last 30 days</span>
+        </div>
+      </div>
+    </main>
+  </div>
+</body>
+</html>`);
+});
+
 // Visitor tracking: set cookie if missing, record one visit per request (idempotent per page load)
 const VISITOR_COOKIE = 'bird_visitor';
 const VISITOR_MAX_AGE = 365 * 24 * 60 * 60 * 1000; // 1 year
