@@ -67,19 +67,30 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(cookieParser());
 
-// Session configuration
-app.use(session({
-  secret: SESSION_SECRET,
-  name: 'birdcam.sid',
-  resave: false,
-  saveUninitialized: false,
-  cookie: {
-    maxAge: 7 * 24 * 60 * 60 * 1000,
-    httpOnly: true,
-    sameSite: 'lax',
-    secure: db.isReverseProxy(), // secure only when behind HTTPS proxy
-  },
-}));
+// Session configuration — middleware is swappable so secret can be rotated at runtime
+function makeSessionMiddleware(secret) {
+  return session({
+    secret,
+    name: 'birdcam.sid',
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: db.isReverseProxy(), // secure only when behind HTTPS proxy
+    },
+  });
+}
+let _sessionMiddleware = makeSessionMiddleware(SESSION_SECRET);
+app.use((req, res, next) => _sessionMiddleware(req, res, next));
+
+// Called by the admin "invalidate sessions" route to rotate the secret
+app.rotateSessionSecret = () => {
+  const newSecret = crypto.randomBytes(32).toString('hex');
+  db.setSetting('session_secret', newSecret);
+  _sessionMiddleware = makeSessionMiddleware(newSecret);
+};
 
 // Rate limiting — create at startup, refresh in background when settings change
 function makeLoginLimiter() {

@@ -1090,6 +1090,15 @@ router.get('/settings', requireLogin, (req, res) => {
     </form>
 
     <fieldset class="settings-group" style="margin-top:1.5rem;">
+      <legend>Sessions</legend>
+      <p class="field-hint" style="padding-left:0;margin:0 0 0.75rem;">Invalidates all active sessions and forces everyone to log in again. Use this if you suspect a session has been compromised or after changing SSL/proxy settings.</p>
+      <form method="post" action="/admin/invalidate-sessions" onsubmit="return confirm('This will log out all users including yourself. Continue?')">
+        <input type="hidden" name="_csrf" value="${getCsrfToken(req)}">
+        <button type="submit" class="btn btn-danger">Invalidate all sessions</button>
+      </form>
+    </fieldset>
+
+    <fieldset class="settings-group" style="margin-top:1.5rem;">
       <legend>Debug</legend>
       <div class="debug-build-info">
         <span class="field-hint" style="padding-left:0;margin:0;">Build: <code>${escapeHtml(BUILD_TIME)}</code></span>
@@ -1257,6 +1266,12 @@ router.post('/settings', requireLogin, verifyCsrf, (req, res) => {
   const siteName = String(req.body.site_name || 'Birdcam Live').trim().slice(0, 60) || 'Birdcam Live';
   db.setSetting('site_name', siteName);
   res.redirect('/admin/settings?msg=Settings+saved');
+});
+
+// --- Invalidate all sessions ---
+router.post('/invalidate-sessions', requireLogin, verifyCsrf, (req, res) => {
+  req.app.rotateSessionSecret();
+  req.session.destroy(() => res.redirect('/admin/login?msg=All+sessions+invalidated'));
 });
 
 // --- Debug info API (reduced info for security) ---
