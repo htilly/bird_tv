@@ -16,7 +16,7 @@ A single-Docker web app to view RTSP birdcam streams in the browser, with a kid-
    ```bash
    docker compose -f docker-compose.github.yml up -d
    ```
-   Uses [htilly/bird_tv](https://github.com/htilly/bird_tv) as the build context.
+   Uses [htilly/birdcam](https://github.com/htilly/birdcam) as the build context.
 
 3. **First-time setup**
    - Go to http://localhost:3000/admin. You’ll be asked to create the first admin account (username + password).

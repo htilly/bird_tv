@@ -4,9 +4,9 @@
 services:
   birdcam:
     build:
-      context: https://github.com/htilly/bird_tv.git
+      context: https://github.com/htilly/birdcam.git
       dockerfile: Dockerfile
-    container_name: bird_tv
+    container_name: birdcam
     ports:
       - "3000:3000"
     environment:
