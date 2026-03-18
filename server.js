@@ -19,6 +19,7 @@ const { auditLog } = require('./middleware/audit');
 
 const PORT = process.env.PORT || 3000;
 const BUILD_TIME = new Date().toISOString();
+const { execSync } = require('child_process');
 
 // Get Git commit hash if available
 let GIT_COMMIT = process.env.GIT_COMMIT || null;
@@ -26,10 +27,8 @@ let GIT_COMMIT = process.env.GIT_COMMIT || null;
 // If not set via env var, try to detect from git (local development)
 if (!GIT_COMMIT || GIT_COMMIT === 'unknown') {
   try {
-    const { execSync } = require('child_process');
-    GIT_COMMIT = execSync('git rev-parse --short HEAD 2>/dev/null', { encoding: 'utf8' }).trim();
+    GIT_COMMIT = execSync('git rev-parse --short HEAD', { encoding: 'utf8', cwd: __dirname }).trim();
   } catch (e) {
-    // Not in a git repo or git not available
     GIT_COMMIT = null;
   }
 }
