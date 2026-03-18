@@ -36,6 +36,10 @@ function startMotionDetector() {
 
   // Start motion.py and pipe ffmpeg stdout to it
   console.log('[motion-manager] Starting motion.py with piped frames');
+  // Pass VAPID keys from DB (or env) so motion.py can send push notifications
+  const vapidPrivateKey = process.env.VAPID_PRIVATE_KEY || db.getSetting('vapid_private_key') || '';
+  const vapidPublicKey  = process.env.VAPID_PUBLIC_KEY  || db.getSetting('vapid_public_key')  || '';
+
   motionProcess = spawn('python3', ['-u', 'motion/motion.py', '--stdin'], {
     stdio: ['pipe', 'inherit', 'inherit'], // stdin=pipe, stdout/stderr=inherit (show in logs)
     env: {
@@ -43,6 +47,8 @@ function startMotionDetector() {
       MOTION_FRAME_WIDTH: '640',
       MOTION_FRAME_HEIGHT: '360',
       MOTION_FRAME_FORMAT: 'bgr24',
+      VAPID_PRIVATE_KEY: vapidPrivateKey,
+      VAPID_PUBLIC_KEY:  vapidPublicKey,
     },
   });
 
