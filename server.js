@@ -269,6 +269,11 @@ app.get('/api/config', (req, res) => {
   res.json({ siteName: db.getSetting('site_name') || 'Birdcam Live' });
 });
 
+// Expose VAPID public key so the browser experimental page can subscribe to push
+app.get('/api/motion/vapid-public-key', (req, res) => {
+  res.json({ publicKey: process.env.VAPID_PUBLIC_KEY || '' });
+});
+
 const server = http.createServer(app);
 
 // --- WebSocket chat with rate limiting ---
@@ -338,6 +343,77 @@ function reloadChatMessages() {
 }
 
 const wss = new WebSocketServer({ server, path: '/ws' });
+
+// ---------------------------------------------------------------------------
+// /motion-ws — relay for motion detector events
+// The Python motion.py connects to its own WS server (port 3001 by default).
+// This handler bridges the browser experimental page to the motion backend
+// so everything flows through the same origin port (no CORS issues).
+// ---------------------------------------------------------------------------
+const motionWss = new WebSocketServer({ server, path: '/motion-ws' });
+const MOTION_BACKEND_URL = process.env.MOTION_WS_URL || 'ws://127.0.0.1:3001';
+
+let _motionBackend = null; // single persistent connection to motion.py
+let _motionReconnectTimer = null;
+const motionBrowserClients = new Set();
+
+function connectMotionBackend() {
+  if (_motionReconnectTimer) return; // already scheduled
+  const { WebSocket: WS } = require('ws');
+  function tryConnect() {
+    _motionReconnectTimer = null;
+    const ws = new WS(MOTION_BACKEND_URL);
+    _motionBackend = ws;
+
+    ws.on('open', () => {
+      console.log('[motion-ws] Connected to motion backend.');
+      // Notify all browser clients that backend is up
+      const msg = JSON.stringify({ type: 'backend_connected' });
+      motionBrowserClients.forEach(c => { if (c.readyState === 1) c.send(msg); });
+    });
+
+    ws.on('message', (data) => {
+      // Relay all motion events to every connected browser client
+      motionBrowserClients.forEach(c => { if (c.readyState === 1) c.send(data.toString()); });
+    });
+
+    ws.on('close', () => {
+      console.log('[motion-ws] Motion backend disconnected. Reconnecting in 5s...');
+      _motionBackend = null;
+      const msg = JSON.stringify({ type: 'backend_disconnected' });
+      motionBrowserClients.forEach(c => { if (c.readyState === 1) c.send(msg); });
+      _motionReconnectTimer = setTimeout(tryConnect, 5000);
+    });
+
+    ws.on('error', (err) => {
+      // Suppress noisy ECONNREFUSED when motion.py isn't running
+      if (err.code !== 'ECONNREFUSED') console.error('[motion-ws] Backend error:', err.message);
+      ws.terminate();
+    });
+  }
+  tryConnect();
+}
+
+// Lazily connect when first browser client arrives
+motionWss.on('connection', (ws, req) => {
+  motionBrowserClients.add(ws);
+  console.log(`[motion-ws] Browser client connected (total: ${motionBrowserClients.size})`);
+
+  // Connect to motion backend if not already connected
+  if (!_motionBackend || _motionBackend.readyState > 1) connectMotionBackend();
+
+  ws.on('message', (data) => {
+    // Forward browser→backend messages (config updates, subscribe, etc.)
+    if (_motionBackend && _motionBackend.readyState === 1) {
+      _motionBackend.send(data.toString());
+    }
+  });
+
+  ws.on('close', () => {
+    motionBrowserClients.delete(ws);
+    console.log(`[motion-ws] Browser client disconnected (total: ${motionBrowserClients.size})`);
+  });
+});
 wss.on('connection', (ws, req) => {
   const origin = req.headers.origin;
   if (origin) {
