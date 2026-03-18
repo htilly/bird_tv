@@ -50,6 +50,23 @@ if (!SESSION_SECRET) {
     console.log('Generated and persisted SESSION_SECRET to database.');
   }
 }
+
+// VAPID keys for Web Push — auto-generate and persist like session secret
+let VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || '';
+let VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || '';
+if (!VAPID_PUBLIC_KEY) {
+  VAPID_PUBLIC_KEY = db.getSetting('vapid_public_key') || '';
+  VAPID_PRIVATE_KEY = db.getSetting('vapid_private_key') || '';
+  if (!VAPID_PUBLIC_KEY) {
+    const ecdh = crypto.createECDH('prime256v1');
+    ecdh.generateKeys();
+    VAPID_PUBLIC_KEY = Buffer.from(ecdh.getPublicKey()).toString('base64url');
+    VAPID_PRIVATE_KEY = Buffer.from(ecdh.getPrivateKey()).toString('base64url');
+    db.setSetting('vapid_public_key', VAPID_PUBLIC_KEY);
+    db.setSetting('vapid_private_key', VAPID_PRIVATE_KEY);
+    console.log('Generated and persisted VAPID keys to database.');
+  }
+}
 streamManager.startAll();
 
 const app = express();
@@ -269,9 +286,9 @@ app.get('/api/config', (req, res) => {
   res.json({ siteName: db.getSetting('site_name') || 'Birdcam Live' });
 });
 
-// Expose VAPID public key so the browser experimental page can subscribe to push
+// Expose VAPID public key so the browser can subscribe to Web Push
 app.get('/api/motion/vapid-public-key', (req, res) => {
-  res.json({ publicKey: process.env.VAPID_PUBLIC_KEY || '' });
+  res.json({ publicKey: VAPID_PUBLIC_KEY });
 });
 
 const server = http.createServer(app);
@@ -396,6 +413,8 @@ function connectMotionBackend() {
 
 // Lazily connect when first browser client arrives
 motionWss.on('connection', (ws, req) => {
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
   motionBrowserClients.add(ws);
   console.log(`[motion-ws] Browser client connected (total: ${motionBrowserClients.size})`);
 
@@ -413,7 +432,24 @@ motionWss.on('connection', (ws, req) => {
     motionBrowserClients.delete(ws);
     console.log(`[motion-ws] Browser client disconnected (total: ${motionBrowserClients.size})`);
   });
+
+  ws.on('error', () => {});
 });
+
+// Keepalive ping for both WebSocket servers — prevents proxy idle timeouts
+const WS_PING_INTERVAL = 30_000;
+const wsPingInterval = setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if (ws.isAlive === false) return ws.terminate();
+    ws.isAlive = false;
+    ws.ping();
+  });
+  motionBrowserClients.forEach((ws) => {
+    if (ws.isAlive === false) return ws.terminate();
+    ws.isAlive = false;
+    ws.ping();
+  });
+}, WS_PING_INTERVAL);
 wss.on('connection', (ws, req) => {
   const origin = req.headers.origin;
   if (origin) {
@@ -430,6 +466,9 @@ wss.on('connection', (ws, req) => {
     }
   }
   
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
+
   const clientIp = getClientIp(req);
   ws._msgTimestamps = [];
   ws._clientIp = clientIp;
@@ -600,8 +639,10 @@ app.use((err, req, res, next) => {
 // --- Graceful shutdown ---
 function shutdown(signal) {
   console.log(`\n${signal} received. Shutting down gracefully...`);
+  clearInterval(wsPingInterval);
   streamManager.stopAll();
   wss.clients.forEach((client) => client.close());
+  motionBrowserClients.forEach((client) => client.close());
   server.close(() => {
     console.log('Server closed.');
     process.exit(0);
