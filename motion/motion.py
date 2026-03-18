@@ -1,0 +1,412 @@
+#!/usr/bin/env python3
+"""
+Birdcam Motion Detector
+=======================
+Reads an RTSP stream, detects motion using OpenCV MOG2 background subtraction,
+and sends bounding box data to the Node.js server via WebSocket.
+
+Connects as a client to the Node.js /motion-ws endpoint (role=detector).
+No extra port needed — everything goes through the main app port.
+
+Usage:
+    python motion.py
+
+Environment overrides (see config.py for full list):
+    MOTION_RTSP_URL, MOTION_RELAY_URL, MOTION_MIN_AREA, etc.
+"""
+
+import asyncio
+import json
+import logging
+import os
+import sqlite3
+import signal
+import sys
+import time
+from datetime import datetime, timezone
+
+import cv2
+import numpy as np
+import websockets
+
+import config
+import push_notifier
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+)
+logger = logging.getLogger('motion')
+
+# ---------------------------------------------------------------------------
+# State
+# ---------------------------------------------------------------------------
+last_notification_time: float = 0.0
+_relay_ws = None  # persistent connection to the Node.js relay
+
+# Where the Node app stores its SQLite DB (mounted as a volume in Docker).
+DB_PATH = os.environ.get('BIRDCAM_DB_PATH', '/app/data/birdcam.db')
+
+
+def get_first_camera_rtsp_from_db():
+    """Return the first configured camera rtsp_url from SQLite, or None."""
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=2)
+        cur = conn.cursor()
+        row = cur.execute('SELECT rtsp_url FROM cameras ORDER BY id LIMIT 1').fetchone()
+        conn.close()
+        if row and isinstance(row[0], str) and row[0].strip():
+            return row[0].strip()
+    except Exception as e:
+        logger.warning(f"Could not read RTSP URL from DB ({DB_PATH}): {e}")
+    return None
+
+# Mutable config (can be updated by clients at runtime)
+runtime_config = {
+    'min_area': config.MIN_CONTOUR_AREA,
+    'threshold_fraction': config.MOTION_THRESHOLD_FRACTION,
+    'cooldown_sec': config.NOTIFICATION_COOLDOWN_SEC,
+}
+
+
+# ---------------------------------------------------------------------------
+# WebSocket client — connects to Node.js /motion-ws?role=detector
+# ---------------------------------------------------------------------------
+
+async def send_to_relay(message: dict):
+    """Send a JSON message to the Node.js relay (if connected)."""
+    global _relay_ws
+    if _relay_ws is None:
+        return
+    try:
+        await _relay_ws.send(json.dumps(message))
+    except Exception:
+        _relay_ws = None
+
+
+async def handle_relay_message(raw: str):
+    """Handle messages forwarded from browser clients via the Node.js relay."""
+    try:
+        msg = json.loads(raw)
+    except json.JSONDecodeError:
+        return
+
+    msg_type = msg.get('type')
+
+    if msg_type == 'config_update':
+        if 'min_area' in msg:
+            runtime_config['min_area'] = max(100, int(msg['min_area']))
+        if 'threshold_fraction' in msg:
+            runtime_config['threshold_fraction'] = max(0.0001, min(1.0, float(msg['threshold_fraction'])))
+        if 'cooldown_sec' in msg:
+            runtime_config['cooldown_sec'] = max(5, int(msg['cooldown_sec']))
+        logger.info(f"Config updated by browser: {runtime_config}")
+        await send_to_relay({'type': 'config', **runtime_config})
+
+    elif msg_type == 'subscribe':
+        subscription = msg.get('subscription')
+        if subscription and isinstance(subscription, dict):
+            push_notifier.add_subscription(config.SUBSCRIPTIONS_FILE, subscription)
+            await send_to_relay({'type': 'subscribed', 'ok': True})
+            logger.info("Push subscription saved.")
+
+    elif msg_type == 'unsubscribe':
+        endpoint = msg.get('endpoint')
+        if endpoint:
+            push_notifier.remove_subscription(config.SUBSCRIPTIONS_FILE, endpoint)
+            await send_to_relay({'type': 'unsubscribed', 'ok': True})
+
+    elif msg_type == 'ping':
+        await send_to_relay({'type': 'pong'})
+
+
+async def relay_connection_loop():
+    """Maintain a persistent WebSocket connection to the Node.js relay."""
+    global _relay_ws
+    backoff = [2, 5, 10, 30]
+    attempt = 0
+
+    while True:
+        url = config.RELAY_URL
+        try:
+            logger.info(f"Connecting to relay at {url}")
+            async with websockets.connect(url, ping_interval=20, ping_timeout=10) as ws:
+                _relay_ws = ws
+                attempt = 0
+                logger.info("Connected to relay.")
+                await ws.send(json.dumps({'type': 'config', **runtime_config}))
+                async for raw in ws:
+                    await handle_relay_message(raw)
+        except (websockets.exceptions.ConnectionClosed, OSError) as e:
+            logger.warning(f"Relay connection lost: {e}")
+        except Exception as e:
+            logger.error(f"Relay connection error: {e}")
+        finally:
+            _relay_ws = None
+
+        delay = backoff[min(attempt, len(backoff) - 1)]
+        attempt += 1
+        logger.info(f"Reconnecting to relay in {delay}s (attempt {attempt})")
+        await asyncio.sleep(delay)
+
+
+# ---------------------------------------------------------------------------
+# Motion detection loop (runs in a thread executor to avoid blocking asyncio)
+# ---------------------------------------------------------------------------
+
+def build_detector():
+    """Create and return a fresh MOG2 background subtractor."""
+    return cv2.createBackgroundSubtractorMOG2(
+        history=config.BG_HISTORY,
+        varThreshold=50,
+        detectShadows=False,
+    )
+
+
+def process_frame(frame, bg_subtractor) -> tuple[bool, list, int, int]:
+    """
+    Apply motion detection to a single frame.
+
+    Returns:
+        (motion_detected, boxes, frame_w, frame_h)
+        boxes = list of {"x", "y", "w", "h", "area"} dicts
+    """
+    # Resize for processing speed
+    h, w = frame.shape[:2]
+    scale = config.PROCESS_WIDTH / w
+    proc_w = config.PROCESS_WIDTH
+    proc_h = int(h * scale)
+    small = cv2.resize(frame, (proc_w, proc_h))
+
+    # Convert to grayscale, blur to reduce noise
+    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+
+    # Ensure blur kernel is odd
+    k = config.BLUR_KERNEL | 1
+    blurred = cv2.GaussianBlur(gray, (k, k), 0)
+
+    # Background subtraction
+    fg_mask = bg_subtractor.apply(blurred)
+
+    # Morphological operations to fill holes and merge nearby regions
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    fg_mask = cv2.dilate(fg_mask, kernel, iterations=config.DILATE_ITERATIONS)
+    fg_mask = cv2.erode(fg_mask, kernel, iterations=1)
+
+    # Find contours
+    contours, _ = cv2.findContours(fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    # Scale factor to map coordinates back to original resolution
+    inv_scale = 1.0 / scale
+
+    boxes = []
+    total_motion_area = 0
+    frame_area = w * h
+
+    for cnt in contours:
+        area_small = cv2.contourArea(cnt)
+        area_orig = area_small * (inv_scale ** 2)
+
+        if area_orig < runtime_config['min_area']:
+            continue
+
+        x, y, bw, bh = cv2.boundingRect(cnt)
+        # Scale back to original frame coordinates
+        boxes.append({
+            'x': int(x * inv_scale),
+            'y': int(y * inv_scale),
+            'w': int(bw * inv_scale),
+            'h': int(bh * inv_scale),
+            'area': int(area_orig),
+        })
+        total_motion_area += area_orig
+
+    motion_fraction = total_motion_area / frame_area if frame_area > 0 else 0
+    motion_detected = motion_fraction >= runtime_config['threshold_fraction']
+
+    return motion_detected, boxes, w, h
+
+
+async def run_motion_loop(loop: asyncio.AbstractEventLoop):
+    """
+    Main RTSP capture and motion detection loop.
+    Runs indefinitely, reconnecting on failure.
+    Broadcasts motion events over WebSocket.
+    """
+    global last_notification_time
+    bg_subtractor = build_detector()
+    warmup_frames = 30  # Let background model stabilise before detecting
+
+    while True:
+        # Resolve RTSP URL either from env or from DB (first camera).
+        rtsp_url = config.RTSP_URL.strip() if isinstance(config.RTSP_URL, str) else ''
+        if not rtsp_url:
+            rtsp_url = get_first_camera_rtsp_from_db() or ''
+            if not rtsp_url:
+                logger.error(
+                    f"No RTSP URL configured in env or DB at {DB_PATH}. "
+                    f"Retrying in {config.RECONNECT_DELAY_SEC}s..."
+                )
+                await send_to_relay({'type': 'status', 'connected': False, 'message': 'No camera configured'})
+                await asyncio.sleep(config.RECONNECT_DELAY_SEC)
+                continue
+
+        logger.info(f"Connecting to RTSP: {rtsp_url}")
+        await send_to_relay({'type': 'status', 'connected': False, 'message': 'Connecting to camera...'})
+
+        # OpenCV calls can block for many seconds (RTSP timeouts).
+        # Run in a worker thread so the asyncio relay connection stays alive.
+        cap = await asyncio.to_thread(cv2.VideoCapture, rtsp_url)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Minimize latency
+
+        opened = await asyncio.to_thread(cap.isOpened)
+        if not opened:
+            logger.warning("Failed to open RTSP stream. Retrying in %ds...", config.RECONNECT_DELAY_SEC)
+            await send_to_relay({'type': 'status', 'connected': False, 'message': 'Camera unavailable. Retrying...'})
+            await asyncio.sleep(config.RECONNECT_DELAY_SEC)
+            bg_subtractor = build_detector()
+            warmup_frames = 30
+            continue
+
+        logger.info("RTSP stream opened.")
+        await send_to_relay({'type': 'status', 'connected': True, 'message': 'Camera connected.'})
+
+        frame_count = 0
+        consecutive_failures = 0
+        MAX_FAILURES = 10
+
+        try:
+            while True:
+                ret, frame = await asyncio.to_thread(cap.read)
+                if not ret:
+                    consecutive_failures += 1
+                    if consecutive_failures >= MAX_FAILURES:
+                        logger.warning("Too many read failures, reconnecting...")
+                        break
+                    await asyncio.sleep(0.1)
+                    continue
+
+                consecutive_failures = 0
+                frame_count += 1
+
+                # Skip detection during warmup (background model learning phase)
+                if frame_count <= warmup_frames:
+                    _, _, _, _ = await asyncio.to_thread(process_frame, frame, bg_subtractor)
+                    if frame_count == warmup_frames:
+                        logger.info("Background model warmed up. Detection active.")
+                    await asyncio.sleep(0)  # Yield to event loop
+                    continue
+
+                motion_detected, boxes, fw, fh = await asyncio.to_thread(process_frame, frame, bg_subtractor)
+
+                # Build and broadcast motion event
+                event = {
+                    'type': 'motion',
+                    'detected': motion_detected,
+                    'boxes': boxes,
+                    'frame_w': fw,
+                    'frame_h': fh,
+                    'timestamp': datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z'),
+                }
+
+                await send_to_relay(event)
+
+                # Fire push notification with cooldown
+                if motion_detected and boxes:
+                    now = time.time()
+                    if now - last_notification_time >= runtime_config['cooldown_sec']:
+                        last_notification_time = now
+                        logger.info(f"Motion detected! {len(boxes)} region(s). Sending push...")
+                        # Run push in background so it doesn't block frame processing
+                        asyncio.ensure_future(send_push_async(len(boxes)))
+
+                # Debug window (disabled by default)
+                if config.DEBUG_WINDOW:
+                    debug_frame = frame.copy()
+                    for box in boxes:
+                        cv2.rectangle(
+                            debug_frame,
+                            (box['x'], box['y']),
+                            (box['x'] + box['w'], box['y'] + box['h']),
+                            (0, 255, 0), 2
+                        )
+                    cv2.imshow('Motion Debug', debug_frame)
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                        logger.info("Debug window closed.")
+                        break
+
+                # Target ~10fps for detection (100ms per frame)
+                await asyncio.sleep(0.1)
+
+        except Exception as e:
+            logger.error(f"Error in motion loop: {e}")
+        finally:
+            cap.release()
+            if config.DEBUG_WINDOW:
+                cv2.destroyAllWindows()
+
+        logger.info(f"Stream ended. Reconnecting in {config.RECONNECT_DELAY_SEC}s...")
+        await send_to_relay({'type': 'status', 'connected': False, 'message': 'Stream interrupted. Reconnecting...'})
+        await asyncio.sleep(config.RECONNECT_DELAY_SEC)
+        bg_subtractor = build_detector()
+        warmup_frames = 30
+
+
+async def send_push_async(num_boxes: int):
+    """Send Web Push notification in a thread pool (non-blocking)."""
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, lambda: push_notifier.notify_all(
+        subscriptions_file=config.SUBSCRIPTIONS_FILE,
+        title='Motion Detected',
+        body=f'Movement detected in {num_boxes} area{"s" if num_boxes != 1 else ""}.',
+        icon='/favicon.png',
+        vapid_private_key=config.VAPID_PRIVATE_KEY,
+        vapid_claims_sub=config.VAPID_CLAIMS_SUB,
+    ))
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+async def main():
+    logger.info("Starting Birdcam Motion Detector")
+    logger.info(f"Relay: {config.RELAY_URL}")
+    logger.info(f"RTSP source: {config.RTSP_URL}")
+    logger.info(f"Min contour area: {config.MIN_CONTOUR_AREA}px\u00b2")
+    logger.info(f"Notification cooldown: {config.NOTIFICATION_COOLDOWN_SEC}s")
+
+    loop = asyncio.get_event_loop()
+
+    stop_event = asyncio.Event()
+
+    def _signal_handler():
+        logger.info("Shutdown signal received.")
+        stop_event.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, _signal_handler)
+        except NotImplementedError:
+            pass
+
+    try:
+        await asyncio.gather(
+            relay_connection_loop(),
+            run_motion_loop(loop),
+            stop_event.wait(),
+        )
+    finally:
+        logger.info("Motion detector stopped.")
+
+
+if __name__ == '__main__':
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Interrupted.")
+        sys.exit(0)
