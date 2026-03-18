@@ -2,17 +2,22 @@
 """
 Birdcam Motion Detector
 =======================
-Reads an RTSP stream, detects motion using OpenCV MOG2 background subtraction,
-and sends bounding box data to the Node.js server via WebSocket.
+Detects motion using OpenCV MOG2 background subtraction.
+Sends bounding box data to the Node.js server via WebSocket.
 
-Connects as a client to the Node.js /motion-ws endpoint (role=detector).
-No extra port needed — everything goes through the main app port.
+Two modes:
+1. RTSP mode (legacy): Opens RTSP stream directly with OpenCV
+2. Stdin mode (recommended): Reads raw BGR24 frames from stdin (piped from ffmpeg)
+   - Avoids duplicate RTSP connection
+   - Lower resource usage
 
 Usage:
-    python motion.py
+    python motion.py              # RTSP mode
+    python motion.py --stdin      # Stdin mode (read frames from pipe)
 
 Environment overrides (see config.py for full list):
     MOTION_RTSP_URL, MOTION_RELAY_URL, MOTION_MIN_AREA, etc.
+    MOTION_FRAME_WIDTH, MOTION_FRAME_HEIGHT, MOTION_FRAME_FORMAT (for stdin mode)
 """
 
 import asyncio
@@ -21,6 +26,7 @@ import logging
 import os
 import sqlite3
 import signal
+import struct
 import sys
 import time
 from datetime import datetime, timezone
@@ -239,6 +245,101 @@ def process_frame(frame, bg_subtractor) -> tuple[bool, list, int, int]:
     return motion_detected, boxes, w, h
 
 
+async def run_motion_loop_stdin(loop: asyncio.AbstractEventLoop, stop_event: asyncio.Event):
+    """
+    Motion detection loop reading raw BGR24 frames from stdin.
+    Frames are piped from ffmpeg to avoid duplicate RTSP connection.
+    """
+    global last_notification_time
+    bg_subtractor = build_detector()
+    warmup_frames = 30
+
+    frame_width = int(os.environ.get('MOTION_FRAME_WIDTH', '640'))
+    frame_height = int(os.environ.get('MOTION_FRAME_HEIGHT', '360'))
+    frame_size = frame_width * frame_height * 3  # BGR24 = 3 bytes per pixel
+
+    logger.info(f"Reading frames from stdin: {frame_width}x{frame_height} BGR24")
+    await send_to_relay({'type': 'status', 'connected': True, 'message': 'Reading frames from stream.'})
+
+    frame_count = 0
+    consecutive_failures = 0
+    MAX_FAILURES = 50
+
+    try:
+        while not stop_event.is_set():
+            # Read one frame worth of bytes from stdin
+            raw_frame = await asyncio.to_thread(sys.stdin.buffer.read, frame_size)
+
+            if len(raw_frame) == 0:
+                # EOF — ffmpeg stream ended
+                logger.info("Stdin EOF (stream ended)")
+                break
+
+            if len(raw_frame) != frame_size:
+                consecutive_failures += 1
+                if consecutive_failures >= MAX_FAILURES:
+                    logger.error(f"Too many incomplete frames ({consecutive_failures}), stopping")
+                    break
+                logger.warning(f"Incomplete frame: expected {frame_size} bytes, got {len(raw_frame)}")
+                await asyncio.sleep(0.1)
+                continue
+
+            consecutive_failures = 0
+            frame_count += 1
+
+            # Convert raw bytes to numpy array
+            frame = np.frombuffer(raw_frame, dtype=np.uint8).reshape((frame_height, frame_width, 3))
+
+            # Skip detection during warmup (background model learning phase)
+            if frame_count <= warmup_frames:
+                _, _, _, _ = await asyncio.to_thread(process_frame, frame, bg_subtractor)
+                if frame_count == warmup_frames:
+                    logger.info("Background model warmed up. Detection active.")
+                await asyncio.sleep(0)
+                continue
+
+            motion_detected, boxes, fw, fh = await asyncio.to_thread(process_frame, frame, bg_subtractor)
+
+            # Build and broadcast motion event
+            event = {
+                'type': 'motion',
+                'detected': motion_detected,
+                'boxes': boxes,
+                'frame_w': fw,
+                'frame_h': fh,
+                'timestamp': datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z'),
+            }
+
+            await send_to_relay(event)
+
+            # Fire push notification with cooldown
+            if motion_detected and boxes:
+                now = time.time()
+                if now - last_notification_time >= runtime_config['cooldown_sec']:
+                    last_notification_time = now
+                    logger.info(f"Motion detected! {len(boxes)} region(s). Sending push...")
+                    push_task = asyncio.create_task(send_push_async(len(boxes)))
+
+                    def _on_push_done(t: asyncio.Task):
+                        try:
+                            _ = t.result()
+                        except asyncio.CancelledError:
+                            return
+                        except Exception:
+                            logger.exception("Background push notification task failed")
+
+                    push_task.add_done_callback(_on_push_done)
+
+            await asyncio.sleep(0)
+
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.error(f"Error in stdin motion loop: {e}")
+    finally:
+        logger.info("Stdin motion loop ended.")
+
+
 async def run_motion_loop(loop: asyncio.AbstractEventLoop, stop_event: asyncio.Event):
     """
     Main RTSP capture and motion detection loop.
@@ -401,9 +502,13 @@ async def send_push_async(num_boxes: int):
 # ---------------------------------------------------------------------------
 
 async def main():
+    use_stdin = '--stdin' in sys.argv
+
     logger.info("Starting Birdcam Motion Detector")
+    logger.info(f"Mode: {'stdin (piped frames)' if use_stdin else 'RTSP direct'}")
     logger.info(f"Relay: {config.RELAY_URL}")
-    logger.info(f"RTSP source: {config.RTSP_URL}")
+    if not use_stdin:
+        logger.info(f"RTSP source: {config.RTSP_URL}")
     logger.info(f"Min contour area: {config.MIN_CONTOUR_AREA}px\u00b2")
     logger.info(f"Notification cooldown: {config.NOTIFICATION_COOLDOWN_SEC}s")
 
@@ -422,7 +527,13 @@ async def main():
             pass
 
     relay_task = asyncio.create_task(relay_connection_loop(stop_event))
-    motion_task = asyncio.create_task(run_motion_loop(loop, stop_event))
+
+    # Choose motion loop based on mode
+    if use_stdin:
+        motion_task = asyncio.create_task(run_motion_loop_stdin(loop, stop_event))
+    else:
+        motion_task = asyncio.create_task(run_motion_loop(loop, stop_event))
+
     stop_wait_task = asyncio.create_task(stop_event.wait())
 
     try:

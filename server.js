@@ -12,6 +12,7 @@ const http = require('http');
 const { spawn } = require('child_process');
 const db = require('./db');
 const streamManager = require('./streamManager');
+const motionManager = require('./motionManager');
 const adminRoutes = require('./routes/admin');
 const recordingsRoutes = require('./routes/recordings');
 const { requestIdMiddleware } = require('./middleware/requestId');
@@ -68,6 +69,11 @@ if (!VAPID_PUBLIC_KEY) {
   }
 }
 streamManager.startAll();
+
+// Start motion detector if enabled (reads frames from ffmpeg, no duplicate RTSP connection)
+if (process.env.ENABLE_MOTION_DETECTOR === 'true') {
+  setTimeout(() => motionManager.startMotionDetector(), 3000);
+}
 
 const app = express();
 
@@ -944,6 +950,7 @@ app.use((err, req, res, next) => {
 function shutdown(signal) {
   console.log(`\n${signal} received. Shutting down gracefully...`);
   clearInterval(wsPingInterval);
+  motionManager.stopMotionDetector();
   streamManager.stopAll();
 
   // Stop any in-progress motion incident recordings (best-effort).
