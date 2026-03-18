@@ -359,108 +359,147 @@ function reloadChatMessages() {
   chatMessages.push(...db.getChatMessages(100));
 }
 
-const wss = new WebSocketServer({ server, path: '/ws' });
+// Use noServer so both WebSocket servers coexist on the same HTTP server.
+// With { server, path }, the first server aborts upgrades for non-matching
+// paths before the second server can handle them.
+const wss = new WebSocketServer({ noServer: true });
+const motionWss = new WebSocketServer({ noServer: true });
+
+server.on('upgrade', (request, socket, head) => {
+  const pathname = new URL(request.url, 'http://localhost').pathname;
+  const ip = request.headers['x-forwarded-for']?.split(',')[0]?.trim() || request.socket.remoteAddress;
+  console.log(`[ws-upgrade] ${request.method} ${pathname} from ${ip}`);
+  if (pathname === '/ws') {
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      wss.emit('connection', ws, request);
+    });
+  } else if (pathname === '/motion-ws') {
+    motionWss.handleUpgrade(request, socket, head, (ws) => {
+      motionWss.emit('connection', ws, request);
+    });
+  } else {
+    console.log(`[ws-upgrade] Rejected unknown path: ${pathname}`);
+    socket.destroy();
+  }
+});
 
 // ---------------------------------------------------------------------------
-// /motion-ws — relay for motion detector events
-// The Python motion.py connects to its own WS server (port 3001 by default).
-// This handler bridges the browser experimental page to the motion backend
-// so everything flows through the same origin port (no CORS issues).
+// /motion-ws — shared channel for the motion detector and browser clients
+// motion.py connects with ?role=detector; browsers connect without it.
+// All traffic flows through port 3000 — no extra ports needed.
 // ---------------------------------------------------------------------------
-const motionWss = new WebSocketServer({ server, path: '/motion-ws' });
-const MOTION_BACKEND_URL = process.env.MOTION_WS_URL || 'ws://127.0.0.1:3001';
-
-let _motionBackend = null; // single persistent connection to motion.py
-let _motionReconnectTimer = null;
+let _motionDetector = null; // the single motion.py detector connection
 const motionBrowserClients = new Set();
 
-function connectMotionBackend() {
-  if (_motionReconnectTimer) return; // already scheduled
-  const { WebSocket: WS } = require('ws');
-  function tryConnect() {
-    _motionReconnectTimer = null;
-    const ws = new WS(MOTION_BACKEND_URL);
-    _motionBackend = ws;
-
-    ws.on('open', () => {
-      console.log('[motion-ws] Connected to motion backend.');
-      // Notify all browser clients that backend is up
-      const msg = JSON.stringify({ type: 'backend_connected' });
-      motionBrowserClients.forEach(c => { if (c.readyState === 1) c.send(msg); });
-    });
-
-    ws.on('message', (data) => {
-      // Relay all motion events to every connected browser client
-      motionBrowserClients.forEach(c => { if (c.readyState === 1) c.send(data.toString()); });
-    });
-
-    ws.on('close', () => {
-      console.log('[motion-ws] Motion backend disconnected. Reconnecting in 5s...');
-      _motionBackend = null;
-      const msg = JSON.stringify({ type: 'backend_disconnected' });
-      motionBrowserClients.forEach(c => { if (c.readyState === 1) c.send(msg); });
-      _motionReconnectTimer = setTimeout(tryConnect, 5000);
-    });
-
-    ws.on('error', (err) => {
-      // Suppress noisy ECONNREFUSED when motion.py isn't running
-      if (err.code !== 'ECONNREFUSED') console.error('[motion-ws] Backend error:', err.message);
-      ws.terminate();
-    });
-  }
-  tryConnect();
-}
-
-// Lazily connect when first browser client arrives
 motionWss.on('connection', (ws, req) => {
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });
-  motionBrowserClients.add(ws);
-  console.log(`[motion-ws] Browser client connected (total: ${motionBrowserClients.size})`);
 
-  // Connect to motion backend if not already connected
-  if (!_motionBackend || _motionBackend.readyState > 1) connectMotionBackend();
+  const url = new URL(req.url, 'http://localhost');
+  const role = url.searchParams.get('role');
+  const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress;
+
+  if (role === 'detector') {
+    // --- Motion detector (Python) connecting ---
+    if (_motionDetector && _motionDetector.readyState === 1) {
+      console.log(`[motion-ws] Replacing existing detector connection with new one from ip=${ip}`);
+      _motionDetector.close(1000, 'replaced');
+    }
+    _motionDetector = ws;
+    console.log(`[motion-ws] Detector connected ip=${ip} (${motionBrowserClients.size} browser(s) watching)`);
+
+    const msg = JSON.stringify({ type: 'backend_connected' });
+    motionBrowserClients.forEach(c => { if (c.readyState === 1) c.send(msg); });
+
+    ws.on('message', (data) => {
+      const str = data.toString();
+      if (motionBrowserClients.size > 0) {
+        motionBrowserClients.forEach(c => { if (c.readyState === 1) c.send(str); });
+      }
+    });
+
+    ws.on('close', (code, reason) => {
+      if (_motionDetector === ws) _motionDetector = null;
+      console.log(`[motion-ws] Detector disconnected ip=${ip} code=${code} reason=${reason || 'none'}`);
+      const dcMsg = JSON.stringify({ type: 'backend_disconnected' });
+      motionBrowserClients.forEach(c => { if (c.readyState === 1) c.send(dcMsg); });
+    });
+
+    ws.on('error', (err) => {
+      console.error(`[motion-ws] Detector error ip=${ip}: ${err.message}`);
+    });
+    return;
+  }
+
+  // --- Browser client ---
+  motionBrowserClients.add(ws);
+  console.log(`[motion-ws] Browser connected ip=${ip} (total: ${motionBrowserClients.size})`);
+
+  const backendOnline = _motionDetector && _motionDetector.readyState === 1;
+  ws.send(JSON.stringify({ type: backendOnline ? 'backend_connected' : 'backend_disconnected' }));
 
   ws.on('message', (data) => {
-    // Forward browser→backend messages (config updates, subscribe, etc.)
-    if (_motionBackend && _motionBackend.readyState === 1) {
-      _motionBackend.send(data.toString());
+    const str = data.toString();
+    console.log(`[motion-ws] Browser → detector: ${str.slice(0, 200)}`);
+    if (_motionDetector && _motionDetector.readyState === 1) {
+      _motionDetector.send(str);
     }
   });
 
-  ws.on('close', () => {
+  ws.on('close', (code, reason) => {
     motionBrowserClients.delete(ws);
-    console.log(`[motion-ws] Browser client disconnected (total: ${motionBrowserClients.size})`);
+    console.log(`[motion-ws] Browser disconnected ip=${ip} code=${code} reason=${reason || 'none'} (total: ${motionBrowserClients.size})`);
   });
 
-  ws.on('error', () => {});
+  ws.on('error', (err) => {
+    console.error(`[motion-ws] Browser error ip=${ip}: ${err.message}`);
+  });
 });
 
 // Keepalive ping for both WebSocket servers — prevents proxy idle timeouts
 const WS_PING_INTERVAL = 30_000;
 const wsPingInterval = setInterval(() => {
   wss.clients.forEach((ws) => {
-    if (ws.isAlive === false) return ws.terminate();
+    if (ws.isAlive === false) {
+      console.log(`[chat-ws] Terminating unresponsive client ip=${ws._clientIp || '?'}`);
+      return ws.terminate();
+    }
     ws.isAlive = false;
     ws.ping();
   });
   motionBrowserClients.forEach((ws) => {
-    if (ws.isAlive === false) return ws.terminate();
+    if (ws.isAlive === false) {
+      console.log(`[motion-ws] Terminating unresponsive browser client`);
+      return ws.terminate();
+    }
     ws.isAlive = false;
     ws.ping();
   });
+  if (_motionDetector) {
+    if (_motionDetector.isAlive === false) {
+      console.log('[motion-ws] Terminating unresponsive detector');
+      _motionDetector.terminate();
+    } else {
+      _motionDetector.isAlive = false;
+      _motionDetector.ping();
+    }
+  }
 }, WS_PING_INTERVAL);
+
 wss.on('connection', (ws, req) => {
+  const clientIp = getClientIp(req);
   const origin = req.headers.origin;
   if (origin) {
     try {
       const o = new URL(origin);
       const host = req.headers.host || '';
       if (o.host !== host) {
+        console.log(`[chat-ws] Rejected origin=${origin} host=${host} ip=${clientIp}`);
         ws.close(1008, 'Origin not allowed');
         return;
       }
     } catch (_) {
+      console.log(`[chat-ws] Rejected invalid origin ip=${clientIp}`);
       ws.close(1008, 'Invalid origin');
       return;
     }
@@ -469,13 +508,16 @@ wss.on('connection', (ws, req) => {
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });
 
-  const clientIp = getClientIp(req);
   ws._msgTimestamps = [];
   ws._clientIp = clientIp;
+  console.log(`[chat-ws] Connected ip=${clientIp} (total: ${wss.clients.size})`);
 
   ws.send(JSON.stringify({ type: 'history', messages: chatMessages.slice(-50) }));
   broadcastStats();
-  ws.on('close', () => broadcastStats());
+  ws.on('close', (code, reason) => {
+    console.log(`[chat-ws] Disconnected ip=${clientIp} code=${code} reason=${reason || 'none'} (total: ${wss.clients.size})`);
+    broadcastStats();
+  });
   ws.on('message', (raw) => {
     try {
       // Rate limiting per connection
@@ -643,6 +685,7 @@ function shutdown(signal) {
   streamManager.stopAll();
   wss.clients.forEach((client) => client.close());
   motionBrowserClients.forEach((client) => client.close());
+  if (_motionDetector) _motionDetector.close(1000, 'shutdown');
   server.close(() => {
     console.log('Server closed.');
     process.exit(0);

@@ -6,8 +6,9 @@
 import os
 
 # --- Camera ---
-# RTSP stream URL for the camera to monitor
-RTSP_URL = os.environ.get('MOTION_RTSP_URL', 'rtsp://user:pass@192.168.1.100:554/stream1')
+# RTSP stream URL for the camera to monitor.
+# If unset, motion.py will read the RTSP URL from the Birdcam SQLite DB.
+RTSP_URL = os.environ.get('MOTION_RTSP_URL', '')
 
 # --- Motion Detection Thresholds ---
 # Minimum contour area (in pixels²) to count as motion. Raise to ignore small changes.
@@ -34,10 +35,10 @@ DILATE_ITERATIONS = int(os.environ.get('MOTION_DILATE_ITERATIONS', 2))
 # Minimum seconds between push notifications (avoid spam)
 NOTIFICATION_COOLDOWN_SEC = int(os.environ.get('MOTION_COOLDOWN_SEC', 30))
 
-# --- WebSocket Server ---
-# The Node.js app will connect to this to receive motion events
-WS_HOST = os.environ.get('MOTION_WS_HOST', '0.0.0.0')
-WS_PORT = int(os.environ.get('MOTION_WS_PORT', 3001))
+# --- WebSocket Relay ---
+# motion.py connects as a client to the Node.js server on this URL.
+# In Docker, use ws://birdcam:3000/motion-ws?role=detector (service name)
+RELAY_URL = os.environ.get('MOTION_RELAY_URL', 'ws://127.0.0.1:3000/motion-ws?role=detector')
 
 # --- Web Push (VAPID) ---
 # Generate these with: python generate_keys.py

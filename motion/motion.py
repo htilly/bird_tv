@@ -3,41 +3,23 @@
 Birdcam Motion Detector
 =======================
 Reads an RTSP stream, detects motion using OpenCV MOG2 background subtraction,
-broadcasts bounding box data over WebSocket, and fires Web Push notifications.
+and sends bounding box data to the Node.js server via WebSocket.
+
+Connects as a client to the Node.js /motion-ws endpoint (role=detector).
+No extra port needed — everything goes through the main app port.
 
 Usage:
     python motion.py
 
 Environment overrides (see config.py for full list):
-    MOTION_RTSP_URL, MOTION_MIN_AREA, MOTION_COOLDOWN_SEC, etc.
-
-WebSocket protocol (broadcasts to connected clients):
-    {
-      "type": "motion",
-      "detected": true|false,
-      "boxes": [{"x": 10, "y": 20, "w": 100, "h": 80, "area": 8000}, ...],
-      "frame_w": 640,
-      "frame_h": 480,
-      "timestamp": "2024-01-01T12:00:00.000Z"
-    }
-
-    {
-      "type": "status",
-      "connected": true|false,
-      "message": "..."
-    }
-
-    {
-      "type": "config",
-      "min_area": 1500,
-      "threshold_fraction": 0.005,
-      "cooldown_sec": 30
-    }
+    MOTION_RTSP_URL, MOTION_RELAY_URL, MOTION_MIN_AREA, etc.
 """
 
 import asyncio
 import json
 import logging
+import os
+import sqlite3
 import signal
 import sys
 import time
@@ -46,7 +28,6 @@ from datetime import datetime, timezone
 import cv2
 import numpy as np
 import websockets
-from websockets.server import serve
 
 import config
 import push_notifier
@@ -64,8 +45,25 @@ logger = logging.getLogger('motion')
 # ---------------------------------------------------------------------------
 # State
 # ---------------------------------------------------------------------------
-connected_clients: set = set()
 last_notification_time: float = 0.0
+_relay_ws = None  # persistent connection to the Node.js relay
+
+# Where the Node app stores its SQLite DB (mounted as a volume in Docker).
+DB_PATH = os.environ.get('BIRDCAM_DB_PATH', '/app/data/birdcam.db')
+
+
+def get_first_camera_rtsp_from_db():
+    """Return the first configured camera rtsp_url from SQLite, or None."""
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=2)
+        cur = conn.cursor()
+        row = cur.execute('SELECT rtsp_url FROM cameras ORDER BY id LIMIT 1').fetchone()
+        conn.close()
+        if row and isinstance(row[0], str) and row[0].strip():
+            return row[0].strip()
+    except Exception as e:
+        logger.warning(f"Could not read RTSP URL from DB ({DB_PATH}): {e}")
+    return None
 
 # Mutable config (can be updated by clients at runtime)
 runtime_config = {
@@ -76,80 +74,84 @@ runtime_config = {
 
 
 # ---------------------------------------------------------------------------
-# WebSocket helpers
+# WebSocket client — connects to Node.js /motion-ws?role=detector
 # ---------------------------------------------------------------------------
 
-async def broadcast(message: dict):
-    """Send JSON message to all connected WebSocket clients."""
-    if not connected_clients:
+async def send_to_relay(message: dict):
+    """Send a JSON message to the Node.js relay (if connected)."""
+    global _relay_ws
+    if _relay_ws is None:
         return
-    data = json.dumps(message)
-    dead = set()
-    for ws in connected_clients.copy():
-        try:
-            await ws.send(data)
-        except Exception:
-            dead.add(ws)
-    connected_clients.difference_update(dead)
-
-
-async def ws_handler(websocket):
-    """Handle incoming WebSocket connections from the browser overlay."""
-    logger.info(f"Client connected: {websocket.remote_address}")
-    connected_clients.add(websocket)
-
-    # Send current config immediately on connect
-    await websocket.send(json.dumps({
-        'type': 'config',
-        **runtime_config,
-    }))
-
     try:
-        async for raw in websocket:
-            try:
-                msg = json.loads(raw)
-                await handle_client_message(websocket, msg)
-            except json.JSONDecodeError:
-                pass
-    except websockets.exceptions.ConnectionClosed:
-        pass
-    finally:
-        connected_clients.discard(websocket)
-        logger.info(f"Client disconnected: {websocket.remote_address}")
+        await _relay_ws.send(json.dumps(message))
+    except Exception:
+        _relay_ws = None
 
 
-async def handle_client_message(websocket, msg: dict):
-    """Handle messages from browser clients (config updates, subscription saves)."""
+async def handle_relay_message(raw: str):
+    """Handle messages forwarded from browser clients via the Node.js relay."""
+    try:
+        msg = json.loads(raw)
+    except json.JSONDecodeError:
+        return
+
     msg_type = msg.get('type')
 
     if msg_type == 'config_update':
-        # Browser can push slider values to update detection sensitivity live
         if 'min_area' in msg:
             runtime_config['min_area'] = max(100, int(msg['min_area']))
         if 'threshold_fraction' in msg:
             runtime_config['threshold_fraction'] = max(0.0001, min(1.0, float(msg['threshold_fraction'])))
         if 'cooldown_sec' in msg:
             runtime_config['cooldown_sec'] = max(5, int(msg['cooldown_sec']))
-        logger.info(f"Config updated by client: {runtime_config}")
-        # Echo config back to all clients
-        await broadcast({'type': 'config', **runtime_config})
+        logger.info(f"Config updated by browser: {runtime_config}")
+        await send_to_relay({'type': 'config', **runtime_config})
 
     elif msg_type == 'subscribe':
-        # Browser sends push subscription object
         subscription = msg.get('subscription')
         if subscription and isinstance(subscription, dict):
             push_notifier.add_subscription(config.SUBSCRIPTIONS_FILE, subscription)
-            await websocket.send(json.dumps({'type': 'subscribed', 'ok': True}))
+            await send_to_relay({'type': 'subscribed', 'ok': True})
             logger.info("Push subscription saved.")
 
     elif msg_type == 'unsubscribe':
         endpoint = msg.get('endpoint')
         if endpoint:
             push_notifier.remove_subscription(config.SUBSCRIPTIONS_FILE, endpoint)
-            await websocket.send(json.dumps({'type': 'unsubscribed', 'ok': True}))
+            await send_to_relay({'type': 'unsubscribed', 'ok': True})
 
     elif msg_type == 'ping':
-        await websocket.send(json.dumps({'type': 'pong'}))
+        await send_to_relay({'type': 'pong'})
+
+
+async def relay_connection_loop():
+    """Maintain a persistent WebSocket connection to the Node.js relay."""
+    global _relay_ws
+    backoff = [2, 5, 10, 30]
+    attempt = 0
+
+    while True:
+        url = config.RELAY_URL
+        try:
+            logger.info(f"Connecting to relay at {url}")
+            async with websockets.connect(url, ping_interval=20, ping_timeout=10) as ws:
+                _relay_ws = ws
+                attempt = 0
+                logger.info("Connected to relay.")
+                await ws.send(json.dumps({'type': 'config', **runtime_config}))
+                async for raw in ws:
+                    await handle_relay_message(raw)
+        except (websockets.exceptions.ConnectionClosed, OSError) as e:
+            logger.warning(f"Relay connection lost: {e}")
+        except Exception as e:
+            logger.error(f"Relay connection error: {e}")
+        finally:
+            _relay_ws = None
+
+        delay = backoff[min(attempt, len(backoff) - 1)]
+        attempt += 1
+        logger.info(f"Reconnecting to relay in {delay}s (attempt {attempt})")
+        await asyncio.sleep(delay)
 
 
 # ---------------------------------------------------------------------------
@@ -240,22 +242,38 @@ async def run_motion_loop(loop: asyncio.AbstractEventLoop):
     warmup_frames = 30  # Let background model stabilise before detecting
 
     while True:
-        logger.info(f"Connecting to RTSP: {config.RTSP_URL}")
-        await broadcast({'type': 'status', 'connected': False, 'message': 'Connecting to camera...'})
+        # Resolve RTSP URL either from env or from DB (first camera).
+        rtsp_url = config.RTSP_URL.strip() if isinstance(config.RTSP_URL, str) else ''
+        if not rtsp_url:
+            rtsp_url = get_first_camera_rtsp_from_db() or ''
+            if not rtsp_url:
+                logger.error(
+                    f"No RTSP URL configured in env or DB at {DB_PATH}. "
+                    f"Retrying in {config.RECONNECT_DELAY_SEC}s..."
+                )
+                await send_to_relay({'type': 'status', 'connected': False, 'message': 'No camera configured'})
+                await asyncio.sleep(config.RECONNECT_DELAY_SEC)
+                continue
 
-        cap = cv2.VideoCapture(config.RTSP_URL)
+        logger.info(f"Connecting to RTSP: {rtsp_url}")
+        await send_to_relay({'type': 'status', 'connected': False, 'message': 'Connecting to camera...'})
+
+        # OpenCV calls can block for many seconds (RTSP timeouts).
+        # Run in a worker thread so the asyncio relay connection stays alive.
+        cap = await asyncio.to_thread(cv2.VideoCapture, rtsp_url)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Minimize latency
 
-        if not cap.isOpened():
+        opened = await asyncio.to_thread(cap.isOpened)
+        if not opened:
             logger.warning("Failed to open RTSP stream. Retrying in %ds...", config.RECONNECT_DELAY_SEC)
-            await broadcast({'type': 'status', 'connected': False, 'message': 'Camera unavailable. Retrying...'})
+            await send_to_relay({'type': 'status', 'connected': False, 'message': 'Camera unavailable. Retrying...'})
             await asyncio.sleep(config.RECONNECT_DELAY_SEC)
             bg_subtractor = build_detector()
             warmup_frames = 30
             continue
 
         logger.info("RTSP stream opened.")
-        await broadcast({'type': 'status', 'connected': True, 'message': 'Camera connected.'})
+        await send_to_relay({'type': 'status', 'connected': True, 'message': 'Camera connected.'})
 
         frame_count = 0
         consecutive_failures = 0
@@ -263,7 +281,7 @@ async def run_motion_loop(loop: asyncio.AbstractEventLoop):
 
         try:
             while True:
-                ret, frame = cap.read()
+                ret, frame = await asyncio.to_thread(cap.read)
                 if not ret:
                     consecutive_failures += 1
                     if consecutive_failures >= MAX_FAILURES:
@@ -277,13 +295,13 @@ async def run_motion_loop(loop: asyncio.AbstractEventLoop):
 
                 # Skip detection during warmup (background model learning phase)
                 if frame_count <= warmup_frames:
-                    _, _, _, _ = process_frame(frame, bg_subtractor)
+                    _, _, _, _ = await asyncio.to_thread(process_frame, frame, bg_subtractor)
                     if frame_count == warmup_frames:
                         logger.info("Background model warmed up. Detection active.")
                     await asyncio.sleep(0)  # Yield to event loop
                     continue
 
-                motion_detected, boxes, fw, fh = process_frame(frame, bg_subtractor)
+                motion_detected, boxes, fw, fh = await asyncio.to_thread(process_frame, frame, bg_subtractor)
 
                 # Build and broadcast motion event
                 event = {
@@ -295,9 +313,7 @@ async def run_motion_loop(loop: asyncio.AbstractEventLoop):
                     'timestamp': datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z'),
                 }
 
-                # Only broadcast to WS if there are clients (avoid building JSON for nothing)
-                if connected_clients:
-                    await broadcast(event)
+                await send_to_relay(event)
 
                 # Fire push notification with cooldown
                 if motion_detected and boxes:
@@ -334,7 +350,7 @@ async def run_motion_loop(loop: asyncio.AbstractEventLoop):
                 cv2.destroyAllWindows()
 
         logger.info(f"Stream ended. Reconnecting in {config.RECONNECT_DELAY_SEC}s...")
-        await broadcast({'type': 'status', 'connected': False, 'message': 'Stream interrupted. Reconnecting...'})
+        await send_to_relay({'type': 'status', 'connected': False, 'message': 'Stream interrupted. Reconnecting...'})
         await asyncio.sleep(config.RECONNECT_DELAY_SEC)
         bg_subtractor = build_detector()
         warmup_frames = 30
@@ -354,30 +370,18 @@ async def send_push_async(num_boxes: int):
 
 
 # ---------------------------------------------------------------------------
-# Subscription HTTP endpoint (lightweight, no extra framework)
-# ---------------------------------------------------------------------------
-# The browser POSTs subscription JSON to /motion/subscribe via the Node server.
-# The Node server proxies it to the motion WS. No separate HTTP server needed.
-
-
-# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 async def main():
-    logger.info(f"Starting Birdcam Motion Detector")
-    logger.info(f"WebSocket server on ws://{config.WS_HOST}:{config.WS_PORT}")
+    logger.info("Starting Birdcam Motion Detector")
+    logger.info(f"Relay: {config.RELAY_URL}")
     logger.info(f"RTSP source: {config.RTSP_URL}")
-    logger.info(f"Min contour area: {config.MIN_CONTOUR_AREA}px²")
+    logger.info(f"Min contour area: {config.MIN_CONTOUR_AREA}px\u00b2")
     logger.info(f"Notification cooldown: {config.NOTIFICATION_COOLDOWN_SEC}s")
 
     loop = asyncio.get_event_loop()
 
-    # Start WebSocket server
-    ws_server = await serve(ws_handler, config.WS_HOST, config.WS_PORT)
-    logger.info(f"WebSocket server listening on ws://{config.WS_HOST}:{config.WS_PORT}")
-
-    # Handle graceful shutdown
     stop_event = asyncio.Event()
 
     def _signal_handler():
@@ -388,17 +392,15 @@ async def main():
         try:
             loop.add_signal_handler(sig, _signal_handler)
         except NotImplementedError:
-            pass  # Windows
+            pass
 
-    # Run motion loop and WS server concurrently
     try:
         await asyncio.gather(
+            relay_connection_loop(),
             run_motion_loop(loop),
             stop_event.wait(),
         )
     finally:
-        ws_server.close()
-        await ws_server.wait_closed()
         logger.info("Motion detector stopped.")
 
 
