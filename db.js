@@ -615,6 +615,27 @@ function listRecentMotionIncidents(limit = 30) {
   `).all(limit);
 }
 
+// Recordings listing for a given camera + calendar date (localtime).
+// Used by the public "Recordings" search UI.
+function listMotionIncidentsForDate(cameraId, yyyymmdd) {
+  if (!cameraId || !yyyymmdd) return [];
+  return stmt('listMotionIncidentsForDate', `
+    SELECT
+      id,
+      camera_id,
+      started_at,
+      ended_at,
+      file_path,
+      size_bytes
+    FROM motion_incidents
+    WHERE
+      camera_id = ?
+      AND ended_at IS NOT NULL
+      AND date(started_at, 'localtime') = ?
+    ORDER BY started_at ASC
+  `).all(cameraId, yyyymmdd);
+}
+
 // --- Motion visit stats (for chart) ---
 function getMotionVisitStats() {
   const byHour = stmt('motionVisitsByHour', `
@@ -722,6 +743,7 @@ module.exports = {
   deleteMotionIncident,
   deleteMotionIncidents,
   listRecentMotionIncidents,
+  listMotionIncidentsForDate,
   listRecentVisits,
   getLastVisitTime,
   getSnapshot,

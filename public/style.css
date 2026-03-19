@@ -1011,7 +1011,7 @@ body {
   border-radius: var(--radius-sm);
   box-shadow: 0 2px 10px var(--shadow);
   overflow: hidden;
-  max-height: 150px;
+  max-height: 320px;
 }
 .recordings-panel.hidden { display: none; }
 

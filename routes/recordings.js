@@ -44,8 +44,27 @@ router.get('/:cameraId', requireLogin, (req, res) => {
   }
 
   if (!cam.rtsp_host) return res.status(400).json({ error: 'Camera has no host configured' });
+  // Use motion_incidents as our "recordings index" for this camera + date.
+  // We filter by local calendar date so it matches what the user picked.
+  const incidents = db.listMotionIncidentsForDate(cam.id, dateStr);
+  const clips = incidents
+    .map((row) => {
+      if (!row.started_at || !row.ended_at) return null;
+      const start = new Date(row.started_at);
+      const end = new Date(row.ended_at);
+      if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end <= start) return null;
+      const durationSec = Math.round((end - start) / 1000);
+      const sizeMB = row.size_bytes != null ? +(row.size_bytes / (1024 * 1024)).toFixed(1) : 0;
+      return {
+        startTime: row.started_at,
+        endTime: row.ended_at,
+        durationSec,
+        sizeMB,
+      };
+    })
+    .filter(Boolean);
 
-  res.status(501).json({ error: 'Recording listing not supported' });
+  res.json({ clips });
 });
 
 // POST /api/recordings/:cameraId/stream  body: {startTime, endTime}

@@ -964,17 +964,25 @@ router.get('/settings', requireLogin, (req, res) => {
   const siteName = settings.site_name || 'Birdcam Live';
   const datetimeLocale = settings.datetime_locale || 'eu';
   res.send(layout('Settings', nav('settings'), `
-    <h1>Settings</h1>
-    ${req.query.msg ? `<div class="admin-msg admin-msg-ok">${escapeHtml(req.query.msg)}</div>` : ''}
+    ${breadcrumb({ label: 'Settings', href: '/admin/settings' })}
+    <div style="display:flex;flex-direction:column;gap:0.35rem;margin-bottom:1.25rem;">
+      <h1 style="margin:0;">Settings</h1>
+      <p style="margin:0;color:#718096;font-size:0.95rem;max-width:44rem;">
+        Tune how Birdcam behaves – from site identity and access control to rate limits, snapshot strip behaviour and motion clip retention.
+      </p>
+      ${req.query.msg ? `<div class="admin-msg admin-msg-ok" style="margin-top:0.5rem;">${escapeHtml(req.query.msg)}</div>` : ''}
+    </div>
     <form method="post" action="/admin/settings" class="admin-form">
       ${csrfField(req)}
       <fieldset class="settings-group">
-        <legend>Site</legend>
+        <legend>Site identity</legend>
         <div>
           <label for="site-name">Site name</label>
           <input type="text" id="site-name" name="site_name" value="${escapeHtml(siteName)}" maxlength="60" style="width:100%;max-width:320px">
         </div>
-        <p class="field-hint">Shown in the browser tab, header logo text, and admin panel. Default: Birdcam Live.</p>
+        <p class="field-hint">
+          Used in the browser tab title, public header and admin header. Default: Birdcam Live.
+        </p>
       </fieldset>
       <fieldset class="settings-group">
         <legend>Time & Date</legend>
@@ -986,11 +994,11 @@ router.get('/settings', requireLogin, (req, res) => {
           </select>
         </div>
         <p class="field-hint">
-          Controls how dates and times are shown in the admin UI (user list, audit log, chat moderation, etc.).
+          Controls how dates and times are shown in the admin UI (users, audit log, chat moderation, visitors, etc.).
         </p>
       </fieldset>
       <fieldset class="settings-group">
-        <legend>Network / Proxy</legend>
+        <legend>Network & proxy</legend>
         <label class="checkbox-label">
           <input type="checkbox" name="reverse_proxy" value="true" ${reverseProxy ? 'checked' : ''}>
           Behind a reverse proxy (nginx, Caddy, Traefik)
@@ -1010,7 +1018,7 @@ router.get('/settings', requireLogin, (req, res) => {
         </label>
         <p class="field-hint">
           When enabled, the HLS video streams (<code>/hls/*</code>) require an authenticated session.
-          When disabled, anyone with the URL can view the streams (public access).
+          When disabled, anyone with the URL can view the streams (public access, useful for kiosks or embedding).
         </p>
       </fieldset>
       <fieldset class="settings-group">
@@ -1026,8 +1034,7 @@ router.get('/settings', requireLogin, (req, res) => {
           </div>
         </div>
         <p class="field-hint">
-          Maximum number of login attempts per IP address within the time window.
-          Default: 15 attempts per 15 minutes.
+          Per-IP login attempts allowed in the window. Default: 15 attempts per 15 minutes.
         </p>
       </fieldset>
       <fieldset class="settings-group">
@@ -1043,7 +1050,7 @@ router.get('/settings', requireLogin, (req, res) => {
           </div>
         </div>
         <p class="field-hint">
-          Rate limit for the initial setup page. Default: 10 attempts per 15 minutes.
+          Rate limit for the initial setup page (first admin creation). Default: 10 attempts per 15 minutes.
         </p>
       </fieldset>
       <fieldset class="settings-group">
@@ -1059,8 +1066,7 @@ router.get('/settings', requireLogin, (req, res) => {
           </div>
         </div>
         <p class="field-hint">
-          Maximum chat messages per user within the time window (WebSocket).
-          Default: 5 messages per 1000ms (1 second).
+          Per-user chat messages allowed in the window (WebSocket). Default: 5 messages per 1000ms (1 second).
         </p>
       </fieldset>
       <fieldset class="settings-group">
@@ -1076,8 +1082,7 @@ router.get('/settings', requireLogin, (req, res) => {
           </div>
         </div>
         <p class="field-hint">
-          Maximum snapshots per IP within the time window.
-          Default: 6 snapshots per 60 seconds.
+          Per-IP snapshots allowed in the window. Default: 6 snapshots per 60 seconds.
         </p>
       </fieldset>
       <fieldset class="settings-group">
@@ -1093,12 +1098,11 @@ router.get('/settings', requireLogin, (req, res) => {
           </div>
         </div>
         <p class="field-hint">
-          Maximum requests to public API endpoints (<code>/api/*</code>) per IP within the time window.
-          Default: 100 requests per 1 minute.
+          Per-IP requests allowed to public API endpoints (<code>/api/*</code>) in the window. Default: 100 requests per 1 minute.
         </p>
       </fieldset>
       <fieldset class="settings-group">
-        <legend>Snapshot Strip</legend>
+        <legend>Snapshot strip</legend>
         <div class="form-row">
           <div>
             <label for="snap-strip-starred">Starred snaps to show</label>
@@ -1111,12 +1115,11 @@ router.get('/settings', requireLogin, (req, res) => {
         </div>
         <p class="field-hint">
           The strip always shows the N most recent starred snaps first, then fills the remaining slots with the latest unstarred snaps.
-          Viewers can also click "⭐ All stars" to browse all starred snaps.
-          Default: 3 starred + up to 5 total.
+          Viewers can also click "⭐ All stars" to browse all starred snaps. Default: 3 starred + up to 5 total.
         </p>
       </fieldset>
       <fieldset class="settings-group">
-        <legend>Motion Clip Retention</legend>
+        <legend>Motion clip retention</legend>
         <div class="form-row">
           <div>
             <label for="motion-clip-max-count">Max clips to keep (unstarred)</label>
@@ -1129,14 +1132,14 @@ router.get('/settings', requireLogin, (req, res) => {
         </div>
         <p class="field-hint">
           After each motion incident, old unstarred clips are deleted until both limits are satisfied.
-          Set a value to <code>0</code> to disable that constraint.
+          Set a value to <code>0</code> to disable that particular constraint.
         </p>
       </fieldset>
       <fieldset class="settings-group">
-        <legend>Detection</legend>
+        <legend>Motion detection (live)</legend>
         <p class="field-hint" style="margin-top:0;">
           Live controls for the motion detector runtime configuration.
-          Changes are applied immediately and affect which incidents get recorded.
+          Changes are applied immediately and affect which incidents are recorded as clips.
         </p>
         <div class="form-row" style="align-items:flex-end;">
           <div>
