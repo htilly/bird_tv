@@ -33,8 +33,8 @@ function stopPlayback(key, sess) {
   playbackSessions.delete(key);
 }
 
-// GET /api/recordings/:cameraId?date=YYYY-MM-DD
-router.get('/:cameraId', requireLogin, (req, res) => {
+// GET /api/recordings/:cameraId?date=YYYY-MM-DD — list clips for date (no login required for public page)
+router.get('/:cameraId', (req, res) => {
   const cam = db.getCamera(Number(req.params.cameraId));
   if (!cam) return res.status(404).json({ error: 'Camera not found' });
 
@@ -43,7 +43,6 @@ router.get('/:cameraId', requireLogin, (req, res) => {
     return res.status(400).json({ error: 'date param required (YYYY-MM-DD)' });
   }
 
-  if (!cam.rtsp_host) return res.status(400).json({ error: 'Camera has no host configured' });
   // Use motion_incidents as our "recordings index" for this camera + date.
   // We filter by local calendar date so it matches what the user picked.
   const incidents = db.listMotionIncidentsForDate(cam.id, dateStr);
