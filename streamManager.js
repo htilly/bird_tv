@@ -28,8 +28,8 @@ const DEFAULT_FFMPEG_OPTIONS = {
   audio_codec: 'aac',
   audio_channels: 1,
   audio_sample_rate: 44100,
-  hls_time: 2,
-  hls_list_size: 3,
+  hls_time: 1,
+  hls_list_size: 2,
   hls_flags: 'delete_segments+append_list',
   extra_input_args: '',
   extra_output_args: '',
@@ -66,7 +66,7 @@ function parseExtraArgs(str) {
   return str.trim().split(/\s+/).filter(Boolean);
 }
 
-function buildFfmpegArgs(rtspUrl, outBase, options) {
+function buildFfmpegArgs(rtspUrl, outBase, options, enableMotionFrames = false) {
   const o = { ...DEFAULT_FFMPEG_OPTIONS, ...options };
   const args = [];
 
@@ -82,6 +82,7 @@ function buildFfmpegArgs(rtspUrl, outBase, options) {
   const extraInput = parseExtraArgs(o.extra_input_args);
   for (let i = 0; i < extraInput.length; i++) args.push(extraInput[i]);
 
+  // HLS output (main stream for viewers)
   if (o.video_codec === 'copy') {
     pushOpt(args, '-c:v', 'copy');
   } else {
@@ -117,10 +118,20 @@ function buildFfmpegArgs(rtspUrl, outBase, options) {
   for (let i = 0; i < extraOutput.length; i++) args.push(extraOutput[i]);
 
   args.push(`${outBase}.m3u8`);
+
+  // Optional: raw BGR24 frames to stdout for motion detection (avoids duplicate RTSP connection)
+  if (enableMotionFrames) {
+    pushOpt(args, '-f', 'rawvideo');
+    pushOpt(args, '-pix_fmt', 'bgr24');
+    pushOpt(args, '-r', '10'); // 10fps for motion detection (reduce CPU)
+    pushOpt(args, '-s', '640x360'); // lower resolution for motion detection
+    args.push('pipe:1');
+  }
+
   return args;
 }
 
-function startStream(cameraId, camera) {
+function startStream(cameraId, camera, enableMotionFrames = false) {
   const rtspUrl = typeof camera === 'string' ? camera : camera.rtsp_url;
   if (!db.validateRtspUrl(rtspUrl)) {
     console.error(`Camera ${cameraId}: refusing to start — invalid RTSP URL`);
@@ -132,9 +143,9 @@ function startStream(cameraId, camera) {
   ensureHlsDir();
   const outBase = path.join(hlsDir, `cam-${cameraId}`);
   const options = typeof camera === 'string' ? {} : parseFfmpegOptions(camera);
-  const args = buildFfmpegArgs(rtspUrl, outBase, options);
+  const args = buildFfmpegArgs(rtspUrl, outBase, options, enableMotionFrames);
   const child = spawn('ffmpeg', args, {
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ['ignore', enableMotionFrames ? 'pipe' : 'ignore', 'pipe'],
     detached: false,
   });
   if (!logs.has(cameraId)) logs.set(cameraId, []);
@@ -209,6 +220,10 @@ function isRunning(cameraId) {
   return p && !p.killed;
 }
 
+function getProcess(cameraId) {
+  return processes.get(cameraId);
+}
+
 function getLogs(cameraId) {
   return logs.get(cameraId) || [];
 }
@@ -235,6 +250,7 @@ module.exports = {
   startAll,
   stopAll,
   isRunning,
+  getProcess,
   getLogs,
   getAllLogs,
   getStreamInfo,
