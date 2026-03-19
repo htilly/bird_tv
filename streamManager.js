@@ -1,6 +1,7 @@
 const { spawn, execSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const fsPromises = require('fs/promises');
 const db = require('./db');
 
 // -fps_mode was added in FFmpeg 5.0; Debian 11 (and similar) ship 4.x
@@ -224,26 +225,33 @@ async function startStream(cameraId, camera, enableMotionFrames = false) {
  * Returns a Promise so callers can await the actual exit before starting a replacement,
  * preventing multiple ffmpeg instances from writing to the same HLS files simultaneously.
  */
-function stopStream(cameraId) {
+async function stopStream(cameraId) {
   const child = processes.get(cameraId);
-  // Delete HLS files for this camera regardless of whether a process is running
+  // (#11) Delete HLS files for this camera asynchronously to avoid blocking the event loop
   const prefix = `cam-${cameraId}`;
   try {
-    fs.readdirSync(hlsDir).forEach((f) => {
-      if (f === `${prefix}.m3u8` || (f.startsWith(`${prefix}-`) && f.endsWith('.ts'))) {
-        fs.unlinkSync(path.join(hlsDir, f));
-      }
-    });
+    const files = await fsPromises.readdir(hlsDir);
+    await Promise.all(
+      files
+        .filter((f) => f === `${prefix}.m3u8` || (f.startsWith(`${prefix}-`) && f.endsWith('.ts')))
+        .map((f) => fsPromises.unlink(path.join(hlsDir, f)).catch(() => {}))
+    );
   } catch (_) {}
 
-  if (!child || !child.kill) return Promise.resolve();
+  if (!child || !child.kill) return;
 
   return new Promise((resolve) => {
     stopping.add(cameraId); // mark as intentional stop
     processes.delete(cameraId);
 
+    // (#20) Safety timeout — resolve even if ffmpeg ignores signals
+    const safetyTimer = setTimeout(() => {
+      resolve();
+    }, 12_000);
+
     // Resolve as soon as the process exits
     child.once('exit', () => {
+      clearTimeout(safetyTimer);
       resolve();
     });
 

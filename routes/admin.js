@@ -845,7 +845,9 @@ router.post('/snapshots/:id/delete', requireLogin, verifyCsrf, auditLog('snapsho
   if (snap) {
     const base = path.basename(snap.filename);
     if (base !== snap.filename || base.includes('..')) return res.redirect('/admin/snapshots');
-    const filePath = path.join(__dirname, '..', 'data', 'snapshots', base);
+    // (#22) Use shared snapshotDir from app.locals instead of fragile __dirname/../data/snapshots
+    const snapDir = req.app.locals.snapshotDir || path.join(__dirname, '..', 'data', 'snapshots');
+    const filePath = path.join(snapDir, base);
     try { fs.unlinkSync(filePath); } catch (_) {}
     db.deleteSnapshot(id);
   }
@@ -856,13 +858,14 @@ router.post('/snapshots/bulk-delete', requireLogin, verifyCsrf, auditLog('snapsh
   let ids = req.body.ids || req.body['ids[]'] || [];
   if (!Array.isArray(ids)) ids = [ids];
   ids = ids.map(Number).filter(n => n > 0);
-  const snapshotDir = path.join(__dirname, '..', 'data', 'snapshots');
+  // (#22) Use shared snapshotDir from app.locals
+  const snapDir = req.app.locals.snapshotDir || path.join(__dirname, '..', 'data', 'snapshots');
   for (const id of ids) {
     const snap = db.getSnapshot(id);
     if (snap) {
       const base = path.basename(snap.filename);
       if (base === snap.filename && !base.includes('..')) {
-        try { fs.unlinkSync(path.join(snapshotDir, base)); } catch (_) {}
+        try { fs.unlinkSync(path.join(snapDir, base)); } catch (_) {}
       }
     }
   }

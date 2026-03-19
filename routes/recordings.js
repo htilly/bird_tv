@@ -7,14 +7,18 @@ const db = require('../db');
 const { requireLogin } = require('../middleware/auth');
 const hlsBaseDir = path.join(__dirname, '..', 'hls');
 
-// Active playback sessions: key -> {process, hlsDir, lastAccess}
+// Active playback sessions: key -> {process, hlsDir, lastAccess, createdAt}
 const playbackSessions = new Map();
 const PLAYBACK_TTL_MS = 5 * 60 * 1000; // clean up after 5 min idle
+// (#17) Maximum session duration regardless of activity — prevents runaway ffmpeg processes
+const PLAYBACK_MAX_DURATION_MS = 30 * 60 * 1000; // 30 minutes absolute max
 
 setInterval(() => {
   const now = Date.now();
   for (const [key, sess] of playbackSessions) {
-    if (now - sess.lastAccess > PLAYBACK_TTL_MS) {
+    const idle = now - sess.lastAccess > PLAYBACK_TTL_MS;
+    const expired = now - sess.createdAt > PLAYBACK_MAX_DURATION_MS;
+    if (idle || expired) {
       stopPlayback(key, sess);
     }
   }
@@ -90,7 +94,7 @@ router.post('/:cameraId/stream', requireLogin, (req, res) => {
   ];
 
   const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'], detached: false });
-  playbackSessions.set(key, { process: proc, hlsDir: pbDir, lastAccess: Date.now() });
+  playbackSessions.set(key, { process: proc, hlsDir: pbDir, lastAccess: Date.now(), createdAt: Date.now() });
 
   proc.on('exit', () => {
     const sess = playbackSessions.get(key);
