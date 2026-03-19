@@ -5,6 +5,33 @@
 
   let UI_LOCALE = { locale: undefined, hour12: undefined };
 
+  function parseDbDate(iso) {
+    if (!iso) return null;
+    if (iso.endsWith('Z') || iso.includes('T')) return new Date(iso);
+    return new Date(iso + 'Z');
+  }
+
+  function formatDateShort(d) {
+    return d.toLocaleDateString(
+      UI_LOCALE.locale ? [UI_LOCALE.locale] : [],
+      { month: 'short', day: 'numeric' }
+    );
+  }
+
+  function formatTimeShort(d) {
+    return d.toLocaleTimeString(
+      UI_LOCALE.locale ? [UI_LOCALE.locale] : [],
+      { hour: '2-digit', minute: '2-digit', hour12: UI_LOCALE.hour12 }
+    );
+  }
+
+  function formatDateTimeFull(d) {
+    return d.toLocaleString(
+      UI_LOCALE.locale ? [UI_LOCALE.locale] : [],
+      { dateStyle: 'medium', timeStyle: 'short', hour12: UI_LOCALE.hour12 }
+    );
+  }
+
   // Apply configurable site name + date/time locale
   fetch('/api/config').then(r => r.json()).then(cfg => {
     const name = cfg.siteName || 'Birdcam Live';
@@ -489,11 +516,11 @@
     }
     const cap = document.createElement('div');
     cap.className = 'snap-thumb-caption';
-    const t = new Date(s.created_at).toLocaleTimeString(
-      UI_LOCALE.locale ? [UI_LOCALE.locale] : [],
-      { hour: '2-digit', minute: '2-digit', hour12: UI_LOCALE.hour12 }
-    );
-    cap.textContent = s.nickname + ' \u00B7 ' + t;
+    const d = parseDbDate(s.created_at);
+    const dateStr = d ? formatDateShort(d) : '';
+    const timeStr = d ? formatTimeShort(d) : '';
+    cap.textContent = s.nickname + ' \u00B7 ' + dateStr;
+    cap.title = timeStr;
     thumb.appendChild(img);
     thumb.appendChild(cap);
     thumb.addEventListener('click', onClick);
@@ -523,10 +550,8 @@
   function openLightbox(s) {
     lightboxSnap = s;
     snapLightboxImg.src = s.url;
-    const t = new Date(s.created_at).toLocaleString(
-      UI_LOCALE.locale ? [UI_LOCALE.locale] : [],
-      { dateStyle: 'medium', timeStyle: 'short', hour12: UI_LOCALE.hour12 }
-    );
+    const d = parseDbDate(s.created_at);
+    const t = d ? formatDateTimeFull(d) : '';
     snapLightboxCaption.textContent = '\uD83D\uDCF7 ' + s.nickname + (s.camera_name ? ' \u00B7 ' + s.camera_name : '') + ' \u00B7 ' + t;
     if (isAdmin && s.id) {
       snapLightboxStar.textContent = s.starred ? '\u2605 Unstar' : '\u2B50 Star';
@@ -816,7 +841,7 @@
       fetch(`/api/recordings/stream/${currentPlaybackKey}`, { method: 'DELETE' }).catch(() => {});
       currentPlaybackKey = null;
     }
-    const displayTimestamp = timestamp || (startTime ? new Date(startTime).toLocaleString() : 'Recording');
+    const displayTimestamp = timestamp || (startTime ? formatDateTimeFull(parseDbDate(startTime)) : 'Recording');
     if (filename) {
       destroyHls();
       video.src = '/clips/' + encodeURIComponent(filename);
@@ -888,15 +913,17 @@
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'rec-chip';
-      const start = c.started_at ? new Date(c.started_at) : null;
-      const end = c.ended_at ? new Date(c.ended_at) : null;
+      const start = parseDbDate(c.started_at);
+      const end = parseDbDate(c.ended_at);
       const durSec = start && end ? Math.round((end - start) / 1000) : null;
-      const timeStr = start ? c.started_at.slice(11, 16) : '—';
+      const dateStr = start ? formatDateShort(start) : '—';
+      const timeStr = start ? formatTimeShort(start) : '';
       const durStr = durSec != null ? `${durSec}s` : '';
 
       const timeEl = document.createElement('span');
       timeEl.className = 'rec-chip-time';
-      timeEl.textContent = timeStr;
+      timeEl.textContent = dateStr;
+      if (timeStr) timeEl.title = timeStr;
 
       const metaEl = document.createElement('span');
       metaEl.className = 'rec-chip-meta';
@@ -916,7 +943,7 @@
 
       btn.addEventListener('click', () => {
         if (!c.filename) return;
-        const timestamp = c.started_at ? new Date(c.started_at).toLocaleString() : 'Recording';
+        const timestamp = start ? formatDateTimeFull(start) : 'Recording';
         playClip(selectedCameraId, null, null, btn, c.filename, timestamp);
       });
 
