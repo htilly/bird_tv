@@ -201,6 +201,21 @@ function migrate() {
       CREATE INDEX idx_audit_action ON audit_log(action);
     `);
   }
+
+  // Migrate hls_time and hls_list_size to low-latency defaults in stored ffmpeg_options.
+  // Cameras created before this change may have hls_time:2, hls_list_size:3 saved in the DB
+  // which would override the new DEFAULT_FFMPEG_OPTIONS values.
+  const cameras = d.prepare('SELECT id, ffmpeg_options FROM cameras').all();
+  const updateOpts = d.prepare('UPDATE cameras SET ffmpeg_options = ? WHERE id = ?');
+  for (const cam of cameras) {
+    try {
+      const opts = cam.ffmpeg_options ? JSON.parse(cam.ffmpeg_options) : {};
+      let changed = false;
+      if (opts.hls_time === 2)      { opts.hls_time = 1;      changed = true; }
+      if (opts.hls_list_size === 3) { opts.hls_list_size = 2; changed = true; }
+      if (changed) updateOpts.run(JSON.stringify(opts), cam.id);
+    } catch (_) {}
+  }
 }
 
 // --- Settings ---
