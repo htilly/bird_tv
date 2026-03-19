@@ -61,6 +61,7 @@
       .then((list) => {
         cameras = list;
         renderTabs();
+        if (recCamera) populateRecCameras();
         if (cameras.length && !selectedCameraId) selectCamera(cameras[0].id);
         if (!cameras.length) {
           selectedCameraId = null;
@@ -692,8 +693,9 @@
     if (!camId || !date) return;
     recList.innerHTML = '<p class="rec-empty">Searching…</p>';
     fetch(`/api/recordings/${camId}?date=${date}`)
-      .then((r) => r.json())
-      .then((data) => {
+      .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok && data && data.error) { recList.innerHTML = `<p class="rec-error">${escapeHtml(data.error)}</p>`; return; }
         if (data.error) { recList.innerHTML = `<p class="rec-error">${escapeHtml(data.error)}</p>`; return; }
         if (!data.clips || !data.clips.length) { recList.innerHTML = '<p class="rec-empty">No recordings found for this date.</p>'; return; }
         recList.innerHTML = '';

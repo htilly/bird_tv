@@ -6,7 +6,14 @@
   "scripts": {
     "start": "node server.js",
     "init-db": "node -e \"require('./db').init()\"",
-    "test": "node --test test/*.js"
+    "test": "node --test test/**/*.test.js",
+    "test:unit": "node --test test/unit/**/*.test.js",
+    "test:security": "node --test test/security/**/*.test.js",
+    "test:coverage": "c8 -r text -r html -r lcov npm test",
+    "test:history": "node test/history/cli.js",
+    "test:history:view": "node test/history/view.js",
+    "test:history:compare": "node test/history/view.js compare",
+    "test:history:trend": "node test/history/view.js trend"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

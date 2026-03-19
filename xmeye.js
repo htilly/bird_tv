@@ -33,6 +33,8 @@ const MSG = {
 };
 
 const HEADER_LEN = 20;
+// (#16) Maximum buffer size to prevent memory exhaustion from malformed responses
+const MAX_BUFFER_SIZE = 1024 * 1024; // 1 MB
 
 function xmeyeHash(password) {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -45,7 +47,7 @@ function xmeyeHash(password) {
 }
 
 function makePacket(sessionId, seq, msgId, payload) {
-  const data = typeof payload === 'object'
+  const data = typeof payload === 'object' && !Buffer.isBuffer(payload)
     ? Buffer.from(JSON.stringify(payload) + '\n\x00', 'utf8')
     : payload;
   const header = Buffer.alloc(HEADER_LEN);
@@ -68,7 +70,8 @@ function parsePacket(buf) {
   if (buf.length < HEADER_LEN + dataLen) return null;
   const sessionId = buf.readUInt32LE(4);
   const seq = buf.readUInt32LE(8);
-  const raw = buf.slice(HEADER_LEN, HEADER_LEN + dataLen);
+  // (#21) Use subarray instead of deprecated slice (avoids copy in newer Node.js)
+  const raw = buf.subarray(HEADER_LEN, HEADER_LEN + dataLen);
   let body = null;
   try {
     const str = raw.toString('utf8').replace(/\x00/g, '').trim();
@@ -110,10 +113,17 @@ class XMEyeSession {
 
   _onData(chunk) {
     this._buf = Buffer.concat([this._buf, chunk]);
+    // (#16) Prevent unbounded buffer growth from malformed/noisy responses
+    if (this._buf.length > MAX_BUFFER_SIZE) {
+      this._rejectAll('Buffer overflow (>1MB) — disconnecting');
+      this.close();
+      return;
+    }
     while (this._buf.length >= HEADER_LEN) {
       const pkt = parsePacket(this._buf);
       if (!pkt) break;
-      this._buf = this._buf.slice(pkt.totalLen);
+      // (#21) Use subarray instead of deprecated slice
+      this._buf = this._buf.subarray(pkt.totalLen);
       // Find pending request by seq or msgId-1 (response msgId = request msgId + 1)
       const entry = this._pending.get(pkt.seq) || this._pending.get(pkt.msgId);
       if (entry) {

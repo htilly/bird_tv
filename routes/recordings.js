@@ -7,14 +7,18 @@ const db = require('../db');
 const { requireLogin } = require('../middleware/auth');
 const hlsBaseDir = path.join(__dirname, '..', 'hls');
 
-// Active playback sessions: key -> {process, hlsDir, lastAccess}
+// Active playback sessions: key -> {process, hlsDir, lastAccess, createdAt}
 const playbackSessions = new Map();
 const PLAYBACK_TTL_MS = 5 * 60 * 1000; // clean up after 5 min idle
+// (#17) Maximum session duration regardless of activity — prevents runaway ffmpeg processes
+const PLAYBACK_MAX_DURATION_MS = 30 * 60 * 1000; // 30 minutes absolute max
 
 setInterval(() => {
   const now = Date.now();
   for (const [key, sess] of playbackSessions) {
-    if (now - sess.lastAccess > PLAYBACK_TTL_MS) {
+    const idle = now - sess.lastAccess > PLAYBACK_TTL_MS;
+    const expired = now - sess.createdAt > PLAYBACK_MAX_DURATION_MS;
+    if (idle || expired) {
       stopPlayback(key, sess);
     }
   }
@@ -29,8 +33,8 @@ function stopPlayback(key, sess) {
   playbackSessions.delete(key);
 }
 
-// GET /api/recordings/:cameraId?date=YYYY-MM-DD
-router.get('/:cameraId', requireLogin, (req, res) => {
+// GET /api/recordings/:cameraId?date=YYYY-MM-DD — list clips for date (no login required for public page)
+router.get('/:cameraId', (req, res) => {
   const cam = db.getCamera(Number(req.params.cameraId));
   if (!cam) return res.status(404).json({ error: 'Camera not found' });
 
@@ -39,9 +43,27 @@ router.get('/:cameraId', requireLogin, (req, res) => {
     return res.status(400).json({ error: 'date param required (YYYY-MM-DD)' });
   }
 
-  if (!cam.rtsp_host) return res.status(400).json({ error: 'Camera has no host configured' });
+  // Use motion_incidents as our "recordings index" for this camera + date.
+  // We filter by local calendar date so it matches what the user picked.
+  const incidents = db.listMotionIncidentsForDate(cam.id, dateStr);
+  const clips = incidents
+    .map((row) => {
+      if (!row.started_at || !row.ended_at) return null;
+      const start = new Date(row.started_at);
+      const end = new Date(row.ended_at);
+      if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end <= start) return null;
+      const durationSec = Math.round((end - start) / 1000);
+      const sizeMB = row.size_bytes != null ? +(row.size_bytes / (1024 * 1024)).toFixed(1) : 0;
+      return {
+        startTime: row.started_at,
+        endTime: row.ended_at,
+        durationSec,
+        sizeMB,
+      };
+    })
+    .filter(Boolean);
 
-  res.status(501).json({ error: 'Recording listing not supported' });
+  res.json({ clips });
 });
 
 // POST /api/recordings/:cameraId/stream  body: {startTime, endTime}
@@ -90,7 +112,7 @@ router.post('/:cameraId/stream', requireLogin, (req, res) => {
   ];
 
   const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'], detached: false });
-  playbackSessions.set(key, { process: proc, hlsDir: pbDir, lastAccess: Date.now() });
+  playbackSessions.set(key, { process: proc, hlsDir: pbDir, lastAccess: Date.now(), createdAt: Date.now() });
 
   proc.on('exit', () => {
     const sess = playbackSessions.get(key);

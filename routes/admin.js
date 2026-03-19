@@ -845,7 +845,9 @@ router.post('/snapshots/:id/delete', requireLogin, verifyCsrf, auditLog('snapsho
   if (snap) {
     const base = path.basename(snap.filename);
     if (base !== snap.filename || base.includes('..')) return res.redirect('/admin/snapshots');
-    const filePath = path.join(__dirname, '..', 'data', 'snapshots', base);
+    // (#22) Use shared snapshotDir from app.locals instead of fragile __dirname/../data/snapshots
+    const snapDir = req.app.locals.snapshotDir || path.join(__dirname, '..', 'data', 'snapshots');
+    const filePath = path.join(snapDir, base);
     try { fs.unlinkSync(filePath); } catch (_) {}
     db.deleteSnapshot(id);
   }
@@ -856,13 +858,14 @@ router.post('/snapshots/bulk-delete', requireLogin, verifyCsrf, auditLog('snapsh
   let ids = req.body.ids || req.body['ids[]'] || [];
   if (!Array.isArray(ids)) ids = [ids];
   ids = ids.map(Number).filter(n => n > 0);
-  const snapshotDir = path.join(__dirname, '..', 'data', 'snapshots');
+  // (#22) Use shared snapshotDir from app.locals
+  const snapDir = req.app.locals.snapshotDir || path.join(__dirname, '..', 'data', 'snapshots');
   for (const id of ids) {
     const snap = db.getSnapshot(id);
     if (snap) {
       const base = path.basename(snap.filename);
       if (base === snap.filename && !base.includes('..')) {
-        try { fs.unlinkSync(path.join(snapshotDir, base)); } catch (_) {}
+        try { fs.unlinkSync(path.join(snapDir, base)); } catch (_) {}
       }
     }
   }
@@ -961,17 +964,23 @@ router.get('/settings', requireLogin, (req, res) => {
   const siteName = settings.site_name || 'Birdcam Live';
   const datetimeLocale = settings.datetime_locale || 'eu';
   res.send(layout('Settings', nav('settings'), `
-    <h1>Settings</h1>
-    ${req.query.msg ? `<div class="admin-msg admin-msg-ok">${escapeHtml(req.query.msg)}</div>` : ''}
+    ${breadcrumb({ label: 'Settings', href: '/admin/settings' })}
+    <div style="display:flex;flex-direction:column;gap:0.35rem;margin-bottom:1.25rem;">
+      <h1 style="margin:0;">Settings</h1>
+      <p style="margin:0;color:#718096;font-size:0.95rem;max-width:44rem;">
+        Tune how Birdcam behaves – from site identity and access control to rate limits, snapshot strip behaviour and motion clip retention.
+      </p>
+      ${req.query.msg ? `<div class="admin-msg admin-msg-ok" style="margin-top:0.5rem;">${escapeHtml(req.query.msg)}</div>` : ''}
+    </div>
     <form method="post" action="/admin/settings" class="admin-form">
       ${csrfField(req)}
       <fieldset class="settings-group">
-        <legend>Site</legend>
+        <legend>Site identity</legend>
         <div>
           <label for="site-name">Site name</label>
           <input type="text" id="site-name" name="site_name" value="${escapeHtml(siteName)}" maxlength="60" style="width:100%;max-width:320px">
         </div>
-        <p class="field-hint">Shown in the browser tab, header logo text, and admin panel. Default: Birdcam Live.</p>
+        <p class="field-hint">Shown in the tab title and in headers on the live and admin pages. Default: Birdcam Live.</p>
       </fieldset>
       <fieldset class="settings-group">
         <legend>Time & Date</legend>
@@ -989,17 +998,12 @@ router.get('/settings', requireLogin, (req, res) => {
         </p>
       </fieldset>
       <fieldset class="settings-group">
-        <legend>Network / Proxy</legend>
+        <legend>Network & proxy</legend>
         <label class="checkbox-label">
           <input type="checkbox" name="reverse_proxy" value="true" ${reverseProxy ? 'checked' : ''}>
           Behind a reverse proxy (nginx, Caddy, Traefik)
         </label>
-        <p class="field-hint">
-          Enable this if Birdcam is behind nginx or another reverse proxy that handles HTTPS/TLS.
-          This sets <code>trust proxy</code>, enables <code>Secure</code> cookies, and trusts
-          <code>X-Forwarded-*</code> headers from the proxy.
-          <strong>Do NOT enable this if the app is directly exposed to the internet.</strong>
-        </p>
+        <p class="field-hint">Turn on when Birdcam runs behind nginx/Caddy/Traefik (HTTPS at the proxy). The app will trust the proxy and use <code>X-Forwarded-*</code> and secure cookies. <strong>Leave off if the app is reached directly from the internet.</strong></p>
       </fieldset>
       <fieldset class="settings-group">
         <legend>Stream Access</legend>
@@ -1007,10 +1011,7 @@ router.get('/settings', requireLogin, (req, res) => {
           <input type="checkbox" name="require_auth_streams" value="true" ${requireAuth ? 'checked' : ''}>
           Require login to view camera streams
         </label>
-        <p class="field-hint">
-          When enabled, the HLS video streams (<code>/hls/*</code>) require an authenticated session.
-          When disabled, anyone with the URL can view the streams (public access).
-        </p>
+        <p class="field-hint">If on, <code>/hls/*</code> streams require login. If off, streams are public (handy for kiosks or embedding).</p>
       </fieldset>
       <fieldset class="settings-group">
         <legend>Login Rate Limiting</legend>
@@ -1024,10 +1025,7 @@ router.get('/settings', requireLogin, (req, res) => {
             <input type="number" id="login-rate-window" name="login_rate_window_min" value="${escapeHtml(loginRateWindow)}" min="1" max="1440">
           </div>
         </div>
-        <p class="field-hint">
-          Maximum number of login attempts per IP address within the time window.
-          Default: 15 attempts per 15 minutes.
-        </p>
+        <p class="field-hint">Login attempts per IP in the time window. Default: 15 per 15 min.</p>
       </fieldset>
       <fieldset class="settings-group">
         <legend>Setup Rate Limiting</legend>
@@ -1041,9 +1039,7 @@ router.get('/settings', requireLogin, (req, res) => {
             <input type="number" id="setup-rate-window" name="setup_rate_window_min" value="${escapeHtml(setupRateWindow)}" min="1" max="1440">
           </div>
         </div>
-        <p class="field-hint">
-          Rate limit for the initial setup page. Default: 10 attempts per 15 minutes.
-        </p>
+        <p class="field-hint">Limits tries on the first-time setup page. Default: 10 per 15 min.</p>
       </fieldset>
       <fieldset class="settings-group">
         <legend>Chat Rate Limiting</legend>
@@ -1057,10 +1053,7 @@ router.get('/settings', requireLogin, (req, res) => {
             <input type="number" id="chat-rate-window" name="chat_rate_window_ms" value="${escapeHtml(chatRateWindow)}" min="100" max="60000">
           </div>
         </div>
-        <p class="field-hint">
-          Maximum chat messages per user within the time window (WebSocket).
-          Default: 5 messages per 1000ms (1 second).
-        </p>
+        <p class="field-hint">Chat messages per user in the window. Default: 5 per second.</p>
       </fieldset>
       <fieldset class="settings-group">
         <legend>Snapshot Rate Limiting</legend>
@@ -1074,10 +1067,7 @@ router.get('/settings', requireLogin, (req, res) => {
             <input type="number" id="snap-rate-window" name="snapshot_rate_window_sec" value="${escapeHtml(snapRateWindow)}" min="10" max="3600">
           </div>
         </div>
-        <p class="field-hint">
-          Maximum snapshots per IP within the time window.
-          Default: 6 snapshots per 60 seconds.
-        </p>
+        <p class="field-hint">Snapshots per IP in the window. Default: 6 per 60 s.</p>
       </fieldset>
       <fieldset class="settings-group">
         <legend>Public API Rate Limiting</legend>
@@ -1091,13 +1081,10 @@ router.get('/settings', requireLogin, (req, res) => {
             <input type="number" id="api-rate-window" name="api_rate_window_min" value="${escapeHtml(apiRateWindow)}" min="1" max="60">
           </div>
         </div>
-        <p class="field-hint">
-          Maximum requests to public API endpoints (<code>/api/*</code>) per IP within the time window.
-          Default: 100 requests per 1 minute.
-        </p>
+        <p class="field-hint">API requests per IP in the window. Default: 100 per minute.</p>
       </fieldset>
       <fieldset class="settings-group">
-        <legend>Snapshot Strip</legend>
+        <legend>Snapshot strip</legend>
         <div class="form-row">
           <div>
             <label for="snap-strip-starred">Starred snaps to show</label>
@@ -1108,14 +1095,10 @@ router.get('/settings', requireLogin, (req, res) => {
             <input type="number" id="snap-strip-total" name="snap_strip_total" value="${escapeHtml(snapStripTotal)}" min="1" max="20">
           </div>
         </div>
-        <p class="field-hint">
-          The strip always shows the N most recent starred snaps first, then fills the remaining slots with the latest unstarred snaps.
-          Viewers can also click "⭐ All stars" to browse all starred snaps.
-          Default: 3 starred + up to 5 total.
-        </p>
+        <p class="field-hint">Strip shows N starred snaps first, then latest unstarred. "All stars" lists all starred. Default: 3 starred, 5 total.</p>
       </fieldset>
       <fieldset class="settings-group">
-        <legend>Motion Clip Retention</legend>
+        <legend>Motion clip retention</legend>
         <div class="form-row">
           <div>
             <label for="motion-clip-max-count">Max clips to keep (unstarred)</label>
@@ -1126,17 +1109,11 @@ router.get('/settings', requireLogin, (req, res) => {
             <input type="number" id="motion-clip-max-total-mb" name="motion_clip_max_total_mb" value="${escapeHtml(motionClipMaxTotalMb)}" min="0" max="1000000">
           </div>
         </div>
-        <p class="field-hint">
-          After each motion incident, old unstarred clips are deleted until both limits are satisfied.
-          Set a value to <code>0</code> to disable that constraint.
-        </p>
+        <p class="field-hint">Old unstarred clips are pruned after each incident until under both limits. Use <code>0</code> to turn off a limit.</p>
       </fieldset>
       <fieldset class="settings-group">
-        <legend>Detection</legend>
-        <p class="field-hint" style="margin-top:0;">
-          Live controls for the motion detector runtime configuration.
-          Changes are applied immediately and affect which incidents get recorded.
-        </p>
+        <legend>Motion detection (live)</legend>
+        <p class="field-hint" style="margin-top:0;">Applied immediately; controls which motion is recorded as clips.</p>
         <div class="form-row" style="align-items:flex-end;">
           <div>
             <label for="motion-sensitivity">Sensitivity</label>
@@ -1169,7 +1146,7 @@ router.get('/settings', requireLogin, (req, res) => {
 
     <fieldset class="settings-group" style="margin-top:1.5rem;">
       <legend>Sessions</legend>
-      <p class="field-hint" style="padding-left:0;margin:0 0 0.75rem;">Invalidates all active sessions and forces everyone to log in again. Use this if you suspect a session has been compromised or after changing SSL/proxy settings.</p>
+      <p class="field-hint" style="padding-left:0;margin:0 0 0.75rem;">Logs out everyone (including you). Use after a suspected compromise or when changing SSL/proxy.</p>
       <form method="post" action="/admin/invalidate-sessions" data-confirm="This will log out all users including yourself. Continue?">
         <input type="hidden" name="_csrf" value="${getCsrfToken(req)}">
         <button type="submit" class="btn btn-danger">Invalidate all sessions</button>
@@ -1178,12 +1155,12 @@ router.get('/settings', requireLogin, (req, res) => {
 
     <fieldset class="settings-group settings-danger-zone" style="margin-top:1.5rem;">
       <legend>&#9888; Danger Zone</legend>
-      <p class="field-hint" style="padding-left:0;margin:0 0 1rem;">These actions are permanent and cannot be undone.</p>
+      <p class="field-hint" style="padding-left:0;margin:0 0 1rem;">Permanent; cannot be undone.</p>
 
       <div class="danger-zone-row">
         <div class="danger-zone-desc">
           <strong>Clear visitor history</strong>
-          <span class="field-hint" style="padding-left:0;display:block;margin-top:0.2rem;">Deletes all <strong>human</strong> visitor tracking data (cookie-based page visits). Stats on the Visitors page will reset to zero. Does not affect bird visit recordings.</span>
+          <span class="field-hint" style="padding-left:0;display:block;margin-top:0.2rem;">Removes human visitor stats (cookie-based). Visitors page resets; bird recordings are unchanged.</span>
         </div>
         <form method="post" action="/admin/reset-visitor-stats" data-confirm="This will permanently delete all human visitor history. Continue?">
           <input type="hidden" name="_csrf" value="${getCsrfToken(req)}">
@@ -1194,7 +1171,7 @@ router.get('/settings', requireLogin, (req, res) => {
       <div class="danger-zone-row" style="margin-top:1rem;padding-top:1rem;border-top:1px solid rgba(220,38,38,0.15);">
         <div class="danger-zone-desc">
           <strong>Clear bird visit recordings</strong>
-          <span class="field-hint" style="padding-left:0;display:block;margin-top:0.2rem;">Deletes all <strong>bird visit</strong> recordings from the database and removes all MP4 files from disk, including starred clips. Also resets the birds 24h / 7d stats. Does not affect human visitor data.</span>
+          <span class="field-hint" style="padding-left:0;display:block;margin-top:0.2rem;">Removes all motion clips from the DB and deletes MP4s (including starred). Resets bird stats. Human visitor data is unchanged.</span>
         </div>
         <form method="post" action="/admin/reset-motion-stats" data-confirm="This will permanently delete all bird visit recordings and their video files, including starred clips. Continue?">
           <input type="hidden" name="_csrf" value="${getCsrfToken(req)}">
@@ -1239,95 +1216,7 @@ router.get('/settings', requireLogin, (req, res) => {
     </div>
 
     <script src="/admin/settings-debug.js"></script>
-    <script>
-      (function () {
-        const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = proto + '//' + location.host + '/motion-ws';
-        const ws = new WebSocket(wsUrl);
-
-        const sensitivityEl = document.getElementById('motion-sensitivity');
-        const cooldownEl = document.getElementById('motion-cooldown');
-        const cooldownValEl = document.getElementById('motion-cooldown-val');
-        const applyBtn = document.getElementById('motion-apply');
-        const statusEl = document.getElementById('motion-live-status');
-
-        // Matches the mapping used in /experimental/
-        const MIN_AREA_MAP = { 2: 4000, 3: 1500, 4: 600 };
-        const thresholdFromSensitivity = (sens) => Number(sens) >= 4 ? 0.001 : 0.005;
-
-        function setCooldownVal(v) {
-          const n = Number(v);
-          if (Number.isFinite(n)) cooldownValEl.textContent = n + 's';
-        }
-
-        function currentConfigPayload() {
-          const sens = Number(sensitivityEl.value);
-          const cooldownSec = Number(cooldownEl.value);
-          return {
-            type: 'config_update',
-            min_area: MIN_AREA_MAP[sens] || 1500,
-            threshold_fraction: thresholdFromSensitivity(sens),
-            cooldown_sec: cooldownSec,
-          };
-        }
-
-        function sendConfigUpdate() {
-          if (!ws || ws.readyState !== WebSocket.OPEN) return;
-          ws.send(JSON.stringify(currentConfigPayload()));
-        }
-
-        ws.addEventListener('open', function () {
-          statusEl.textContent = 'Connected to detector';
-        });
-
-        ws.addEventListener('message', function (ev) {
-          let msg = null;
-          try { msg = JSON.parse(ev.data); } catch (_) {}
-          if (!msg) return;
-
-          if (msg.type === 'config') {
-            // Update cooldown
-            if (msg.cooldown_sec !== undefined) {
-              cooldownEl.value = Number(msg.cooldown_sec);
-              setCooldownVal(cooldownEl.value);
-            }
-
-            // Update sensitivity by nearest min_area bucket
-            if (msg.min_area !== undefined) {
-              const minArea = Number(msg.min_area);
-              const candidates = Object.keys(MIN_AREA_MAP).map(s => ({
-                sens: Number(s),
-                dist: Math.abs(MIN_AREA_MAP[s] - minArea),
-              }));
-              candidates.sort((a, b) => a.dist - b.dist);
-              const best = candidates[0] && Number.isFinite(candidates[0].sens) ? candidates[0].sens : Number(sensitivityEl.value);
-              if (best) sensitivityEl.value = String(best);
-            }
-
-            statusEl.textContent = 'Detector config applied';
-          }
-
-          if (msg.type === 'backend_connected') {
-            statusEl.textContent = 'Detector backend online';
-          }
-        });
-
-        ws.addEventListener('close', function () {
-          statusEl.textContent = 'Detector connection closed (refresh page to reconnect)';
-        });
-
-        ws.addEventListener('error', function () {
-          statusEl.textContent = 'Detector connection error';
-        });
-
-        applyBtn.addEventListener('click', function () {
-          statusEl.textContent = 'Applying…';
-          sendConfigUpdate();
-        });
-
-        cooldownEl.addEventListener('input', function () { setCooldownVal(this.value); });
-      })();
-    </script>
+    <script src="/admin/settings-motion.js"></script>
   `));
 });
 
@@ -1679,71 +1568,7 @@ router.get('/chat', requireLogin, (req, res) => {
       ` : '<p style="color:#999;">No chat messages.</p>'}
     </div>
 
-    <script>
-      (function() {
-        const selectAll = document.getElementById('select-all');
-        const checkboxes = document.querySelectorAll('.msg-select');
-        const bulkBtn = document.getElementById('bulk-delete-btn');
-        const bulkIds = document.getElementById('bulk-delete-ids');
-        const rows = document.querySelectorAll('tr[data-id]');
-        const selectUserNickname = document.getElementById('select-user-nickname');
-        const selectUserBtn = document.getElementById('select-user-btn');
-        const clearSelectionBtn = document.getElementById('clear-selection-btn');
-        const selectUserInlineButtons = document.querySelectorAll('.select-user-btn');
-        
-        function updateBulkBtn() {
-          const selected = Array.from(checkboxes).filter(c => c.checked).map(c => c.value);
-          bulkBtn.disabled = selected.length === 0;
-          bulkIds.value = selected.join(',');
-
-          if (selectAll) {
-            const checkedCount = Array.from(checkboxes).filter(c => c.checked).length;
-            selectAll.checked = checkedCount > 0 && checkedCount === checkboxes.length;
-            selectAll.indeterminate = checkedCount > 0 && checkedCount < checkboxes.length;
-          }
-        }
-
-        function selectMessagesByNickname(nickname) {
-          if (!nickname) return;
-          rows.forEach((row) => {
-            const cb = row.querySelector('.msg-select');
-            if (!cb) return;
-            cb.checked = row.getAttribute('data-nickname') === nickname;
-          });
-          updateBulkBtn();
-        }
-        
-        if (selectAll) {
-          selectAll.addEventListener('change', function() {
-            checkboxes.forEach(c => c.checked = this.checked);
-            updateBulkBtn();
-          });
-        }
-
-        if (selectUserBtn) {
-          selectUserBtn.addEventListener('click', function() {
-            selectMessagesByNickname(selectUserNickname.value);
-          });
-        }
-
-        if (clearSelectionBtn) {
-          clearSelectionBtn.addEventListener('click', function() {
-            checkboxes.forEach(c => c.checked = false);
-            updateBulkBtn();
-          });
-        }
-
-        selectUserInlineButtons.forEach(btn => {
-          btn.addEventListener('click', function() {
-            const nickname = this.getAttribute('data-nickname');
-            if (selectUserNickname) selectUserNickname.value = nickname;
-            selectMessagesByNickname(nickname);
-          });
-        });
-        
-        checkboxes.forEach(c => c.addEventListener('change', updateBulkBtn));
-      })();
-    </script>
+    <script src="/admin/chat-admin.js"></script>
   `));
 });
 

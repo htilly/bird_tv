@@ -6,6 +6,22 @@ const dataDir = path.join(__dirname, 'data');
 const dbPath = path.join(dataDir, 'birdcam.db');
 let db;
 
+// --- Prepared statement cache (lazy-initialized after DB is ready) ---
+// Avoids re-creating prepared statement objects on every function call.
+// better-sqlite3 does internal caching by SQL string, but this eliminates
+// the lookup overhead and object allocation on hot paths.
+const _stmtCache = {};
+function stmt(key, sql) {
+  if (!_stmtCache[key]) _stmtCache[key] = getDb().prepare(sql);
+  return _stmtCache[key];
+}
+
+// --- Cached setting: isReverseProxy (#5) ---
+// Avoids hitting SQLite on every HTTP request for trust-proxy check.
+let _reverseProxyCache = null;
+let _reverseProxyCacheTime = 0;
+const REVERSE_PROXY_CACHE_TTL = 30_000; // 30 seconds
+
 function getDb() {
   if (!db) {
     fs.mkdirSync(dataDir, { recursive: true });
@@ -242,16 +258,18 @@ const DEFAULT_SETTINGS = {
 };
 
 function getSetting(key) {
-  const row = getDb().prepare('SELECT value FROM settings WHERE key = ?').get(key);
+  const row = stmt('getSetting', 'SELECT value FROM settings WHERE key = ?').get(key);
   return row ? row.value : (DEFAULT_SETTINGS[key] || '');
 }
 
 function setSetting(key, value) {
-  getDb().prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(key, String(value));
+  stmt('setSetting', 'INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(key, String(value));
+  // Invalidate reverse proxy cache when any setting changes (#5)
+  _reverseProxyCache = null;
 }
 
 function getAllSettings() {
-  const rows = getDb().prepare('SELECT key, value FROM settings').all();
+  const rows = stmt('getAllSettings', 'SELECT key, value FROM settings').all();
   const result = { ...DEFAULT_SETTINGS };
   for (const row of rows) {
     result[row.key] = row.value;
@@ -259,8 +277,15 @@ function getAllSettings() {
   return result;
 }
 
+// (#5) Cached version — avoids DB hit on every HTTP request.
+// Cache is invalidated when any setting is saved via setSetting().
 function isReverseProxy() {
-  return getSetting('reverse_proxy') === 'true';
+  const now = Date.now();
+  if (_reverseProxyCache === null || now - _reverseProxyCacheTime > REVERSE_PROXY_CACHE_TTL) {
+    _reverseProxyCache = getSetting('reverse_proxy') === 'true';
+    _reverseProxyCacheTime = now;
+  }
+  return _reverseProxyCache;
 }
 
 function buildRtspUrl(host, port, urlPath, username, password) {
@@ -287,19 +312,24 @@ function ensureAdmin(username, password) {
 }
 
 function findUserByUsername(username) {
-  return getDb().prepare('SELECT * FROM users WHERE username = ?').get(username);
+  return stmt('findUserByUsername', 'SELECT * FROM users WHERE username = ?').get(username);
 }
 
 function getUser(id) {
-  return getDb().prepare('SELECT id, username, created_at FROM users WHERE id = ?').get(id);
+  return stmt('getUser', 'SELECT id, username, created_at FROM users WHERE id = ?').get(id);
+}
+
+// (#6) Exported for auth middleware to avoid re-preparing per request
+function userExists(id) {
+  return !!stmt('userExists', 'SELECT id FROM users WHERE id = ?').get(id);
 }
 
 function listUsers() {
-  return getDb().prepare('SELECT id, username, created_at FROM users ORDER BY id').all();
+  return stmt('listUsers', 'SELECT id, username, created_at FROM users ORDER BY id').all();
 }
 
 function countUsers() {
-  return getDb().prepare('SELECT COUNT(*) as n FROM users').get().n;
+  return stmt('countUsers', 'SELECT COUNT(*) as n FROM users').get().n;
 }
 
 function createUser(username, password) {
@@ -324,11 +354,11 @@ function verifyPassword(password, hash) {
 }
 
 function listCameras() {
-  return getDb().prepare('SELECT * FROM cameras ORDER BY id').all();
+  return stmt('listCameras', 'SELECT * FROM cameras ORDER BY id').all();
 }
 
 function getCamera(id) {
-  return getDb().prepare('SELECT * FROM cameras WHERE id = ?').get(id);
+  return stmt('getCamera', 'SELECT * FROM cameras WHERE id = ?').get(id);
 }
 
 function createCamera(display_name, host, port, urlPath, username, password, ffmpegOptionsJson = '{}') {
@@ -368,23 +398,23 @@ function deleteCamera(id) {
 
 // --- Snapshots ---
 function getSnapshot(id) {
-  return getDb().prepare("SELECT * FROM snapshots WHERE id = ?").get(id);
+  return stmt('getSnapshot', "SELECT * FROM snapshots WHERE id = ?").get(id);
 }
 
 function addSnapshot(filename, nickname, cameraName) {
-  getDb().prepare("INSERT INTO snapshots (filename, nickname, camera_name) VALUES (?, ?, ?)").run(filename, nickname, cameraName || '');
+  stmt('addSnapshot', "INSERT INTO snapshots (filename, nickname, camera_name) VALUES (?, ?, ?)").run(filename, nickname, cameraName || '');
 }
 
 function getLatestSnapshots(limit = 3) {
-  return getDb().prepare("SELECT * FROM snapshots ORDER BY id DESC LIMIT ?").all(limit);
+  return stmt('getLatestSnapshots', "SELECT * FROM snapshots ORDER BY id DESC LIMIT ?").all(limit);
 }
 
 function getAllSnapshots(limit = 50) {
-  return getDb().prepare("SELECT * FROM snapshots ORDER BY id DESC LIMIT ?").all(limit);
+  return stmt('getAllSnapshots', "SELECT * FROM snapshots ORDER BY id DESC LIMIT ?").all(limit);
 }
 
 function deleteSnapshot(id) {
-  return getDb().prepare("DELETE FROM snapshots WHERE id = ?").run(id);
+  return stmt('deleteSnapshot', "DELETE FROM snapshots WHERE id = ?").run(id);
 }
 
 function deleteSnapshots(ids) {
@@ -405,31 +435,39 @@ function setSnapshotStarred(id, starred) {
 }
 
 function getStarredSnapshot() {
-  return getDb().prepare("SELECT * FROM snapshots WHERE starred = 1 LIMIT 1").get();
+  return stmt('getStarredSnapshot', "SELECT * FROM snapshots WHERE starred = 1 LIMIT 1").get();
 }
 
 function getStarredSnapshots(limit = 3) {
-  return getDb().prepare("SELECT * FROM snapshots WHERE starred = 1 ORDER BY id DESC LIMIT ?").all(limit);
+  return stmt('getStarredSnapshots', "SELECT * FROM snapshots WHERE starred = 1 ORDER BY id DESC LIMIT ?").all(limit);
 }
 
 function getAllStarredSnapshots() {
-  return getDb().prepare("SELECT * FROM snapshots WHERE starred = 1 ORDER BY id DESC").all();
+  return stmt('getAllStarredSnapshots', "SELECT * FROM snapshots WHERE starred = 1 ORDER BY id DESC").all();
 }
 
 // --- Chat messages ---
+let _chatInsertCount = 0;
+const CHAT_PRUNE_EVERY = 10; // (#4) Only prune DB every Nth insert, not every one
+
 function addChatMessage(nickname, text, time, ipAddress = null) {
-  const result = getDb().prepare('INSERT INTO chat_messages (nickname, text, time, ip_address) VALUES (?, ?, ?, ?)').run(nickname, text, time, ipAddress);
-  // Prune to keep only last 100 messages
-  getDb().prepare('DELETE FROM chat_messages WHERE id NOT IN (SELECT id FROM chat_messages ORDER BY id DESC LIMIT 100)').run();
+  const result = stmt('addChatMessage', 'INSERT INTO chat_messages (nickname, text, time, ip_address) VALUES (?, ?, ?, ?)').run(nickname, text, time, ipAddress);
+  // (#4) Prune to keep only last 100 messages — but only every Nth insert
+  // to avoid running the expensive subquery on every single chat message.
+  _chatInsertCount++;
+  if (_chatInsertCount >= CHAT_PRUNE_EVERY) {
+    _chatInsertCount = 0;
+    stmt('pruneChatMessages', 'DELETE FROM chat_messages WHERE id NOT IN (SELECT id FROM chat_messages ORDER BY id DESC LIMIT 100)').run();
+  }
   return result.lastInsertRowid;
 }
 
 function getChatMessages(limit = 50) {
-  return getDb().prepare('SELECT id, nickname, text, time, ip_address FROM chat_messages ORDER BY id DESC LIMIT ?').all(limit).reverse();
+  return stmt('getChatMessages', 'SELECT id, nickname, text, time, ip_address FROM chat_messages ORDER BY id DESC LIMIT ?').all(limit).reverse();
 }
 
 function deleteChatMessage(id) {
-  return getDb().prepare('DELETE FROM chat_messages WHERE id = ?').run(id);
+  return stmt('deleteChatMessage', 'DELETE FROM chat_messages WHERE id = ?').run(id);
 }
 
 function deleteChatMessages(ids) {
@@ -445,7 +483,7 @@ function clearAllChatMessages() {
 // --- IP Bans ---
 function addBan(ipAddress, reason = null, bannedBy = null) {
   try {
-    getDb().prepare('INSERT OR REPLACE INTO banned_ips (ip_address, reason, banned_by) VALUES (?, ?, ?)').run(ipAddress, reason, bannedBy);
+    stmt('addBan', 'INSERT OR REPLACE INTO banned_ips (ip_address, reason, banned_by) VALUES (?, ?, ?)').run(ipAddress, reason, bannedBy);
     return true;
   } catch (_) {
     return false;
@@ -453,39 +491,47 @@ function addBan(ipAddress, reason = null, bannedBy = null) {
 }
 
 function removeBan(ipAddress) {
-  return getDb().prepare('DELETE FROM banned_ips WHERE ip_address = ?').run(ipAddress);
+  return stmt('removeBan', 'DELETE FROM banned_ips WHERE ip_address = ?').run(ipAddress);
 }
 
 function isIpBanned(ipAddress) {
-  const row = getDb().prepare('SELECT 1 FROM banned_ips WHERE ip_address = ?').get(ipAddress);
+  const row = stmt('isIpBanned', 'SELECT 1 FROM banned_ips WHERE ip_address = ?').get(ipAddress);
   return !!row;
 }
 
 function listBans() {
-  return getDb().prepare('SELECT * FROM banned_ips ORDER BY created_at DESC').all();
+  return stmt('listBans', 'SELECT * FROM banned_ips ORDER BY created_at DESC').all();
 }
 
 // --- Visitor stats ---
+let _visitInsertCount = 0;
+const VISIT_PRUNE_EVERY = 50; // (#1) Prune visits older than 90 days periodically
+
 function recordVisit(visitorKey) {
   if (!visitorKey || String(visitorKey).length > 128) return;
-  getDb().prepare('INSERT INTO visits (visitor_key, created_at) VALUES (?, datetime(\'now\'))').run(String(visitorKey));
+  stmt('recordVisit', "INSERT INTO visits (visitor_key, created_at) VALUES (?, datetime('now'))").run(String(visitorKey));
+  // (#1) Periodically prune old visits to prevent unbounded table growth
+  _visitInsertCount++;
+  if (_visitInsertCount >= VISIT_PRUNE_EVERY) {
+    _visitInsertCount = 0;
+    stmt('pruneVisits', "DELETE FROM visits WHERE datetime(created_at) < datetime('now', '-90 days')").run();
+  }
 }
 
 function getVisitorStats() {
-  const d = getDb();
-  const uniqueToday = d.prepare(`
+  const uniqueToday = stmt('visitorStatsToday', `
     SELECT COUNT(DISTINCT visitor_key) as n FROM visits
     WHERE date(created_at, 'localtime') = date('now', 'localtime')
   `).get().n;
-  const uniqueWeek = d.prepare(`
+  const uniqueWeek = stmt('visitorStatsWeek', `
     SELECT COUNT(DISTINCT visitor_key) as n FROM visits
     WHERE datetime(created_at) >= datetime('now', '-7 days')
   `).get().n;
-  const uniqueMonth = d.prepare(`
+  const uniqueMonth = stmt('visitorStatsMonth', `
     SELECT COUNT(DISTINCT visitor_key) as n FROM visits
     WHERE datetime(created_at) >= datetime('now', '-30 days')
   `).get().n;
-  const daily = d.prepare(`
+  const daily = stmt('visitorStatsDaily', `
     SELECT date(created_at, 'localtime') as date, COUNT(DISTINCT visitor_key) as count
     FROM visits
     WHERE datetime(created_at) >= datetime('now', '-30 days')
@@ -497,37 +543,36 @@ function getVisitorStats() {
 
 // --- Motion incidents (motion clips) ---
 function addMotionIncident(cameraId, startedAtIso, filePath) {
-  const d = getDb();
-  const r = d.prepare(
+  const r = stmt('addMotionIncident',
     'INSERT INTO motion_incidents (camera_id, started_at, file_path) VALUES (?, ?, ?)'
   ).run(cameraId, startedAtIso, filePath);
   return r.lastInsertRowid;
 }
 
 function updateMotionIncidentLastMotion(id, lastMotionAtIso) {
-  getDb().prepare('UPDATE motion_incidents SET last_motion_at = ? WHERE id = ?').run(lastMotionAtIso, id);
+  stmt('updateMotionIncidentLastMotion', 'UPDATE motion_incidents SET last_motion_at = ? WHERE id = ?').run(lastMotionAtIso, id);
 }
 
 function endMotionIncident(id, endedAtIso, sizeBytes) {
-  getDb().prepare(
+  stmt('endMotionIncident',
     'UPDATE motion_incidents SET ended_at = ?, size_bytes = ? WHERE id = ?'
   ).run(endedAtIso, sizeBytes || 0, id);
 }
 
 function setMotionIncidentStar(id, starred) {
-  getDb().prepare(
+  stmt('setMotionIncidentStar',
     'UPDATE motion_incidents SET starred = ? WHERE id = ?'
   ).run(starred ? 1 : 0, id);
-  const row = getDb().prepare('SELECT id, starred FROM motion_incidents WHERE id = ?').get(id);
+  const row = stmt('getMotionIncidentStar', 'SELECT id, starred FROM motion_incidents WHERE id = ?').get(id);
   return row || null;
 }
 
 function getMotionIncident(id) {
-  return getDb().prepare('SELECT * FROM motion_incidents WHERE id = ?').get(id);
+  return stmt('getMotionIncident', 'SELECT * FROM motion_incidents WHERE id = ?').get(id);
 }
 
 function getUnstarredMotionIncidentTotals() {
-  const row = getDb().prepare(`
+  const row = stmt('getUnstarredMotionIncidentTotals', `
     SELECT
       COUNT(*) as n,
       COALESCE(SUM(size_bytes), 0) as bytes
@@ -538,7 +583,7 @@ function getUnstarredMotionIncidentTotals() {
 }
 
 function getOldestUnstarredMotionIncidents(limit = 1) {
-  return getDb().prepare(`
+  return stmt('getOldestUnstarredMotionIncidents', `
     SELECT id, file_path, size_bytes
     FROM motion_incidents
     WHERE ended_at IS NOT NULL AND starred = 0
@@ -548,11 +593,18 @@ function getOldestUnstarredMotionIncidents(limit = 1) {
 }
 
 function deleteMotionIncident(id) {
-  getDb().prepare('DELETE FROM motion_incidents WHERE id = ?').run(id);
+  stmt('deleteMotionIncident', 'DELETE FROM motion_incidents WHERE id = ?').run(id);
+}
+
+// (#10) Batch deletion for retention enforcement — deletes multiple incidents in one query
+function deleteMotionIncidents(ids) {
+  if (!ids || !ids.length) return;
+  const placeholders = ids.map(() => '?').join(',');
+  getDb().prepare(`DELETE FROM motion_incidents WHERE id IN (${placeholders})`).run(...ids);
 }
 
 function listRecentMotionIncidents(limit = 30) {
-  return getDb().prepare(`
+  return stmt('listRecentMotionIncidents', `
     SELECT
       mi.*,
       c.display_name as camera_name
@@ -563,11 +615,30 @@ function listRecentMotionIncidents(limit = 30) {
   `).all(limit);
 }
 
+// Recordings listing for a given camera + calendar date (localtime).
+// Used by the public "Recordings" search UI.
+function listMotionIncidentsForDate(cameraId, yyyymmdd) {
+  if (!cameraId || !yyyymmdd) return [];
+  return stmt('listMotionIncidentsForDate', `
+    SELECT
+      id,
+      camera_id,
+      started_at,
+      ended_at,
+      file_path,
+      size_bytes
+    FROM motion_incidents
+    WHERE
+      camera_id = ?
+      AND ended_at IS NOT NULL
+      AND date(started_at, 'localtime') = ?
+    ORDER BY started_at ASC
+  `).all(cameraId, yyyymmdd);
+}
+
 // --- Motion visit stats (for chart) ---
 function getMotionVisitStats() {
-  const d = getDb();
-  // Visits per hour for the last 24h (only ended incidents)
-  const byHour = d.prepare(`
+  const byHour = stmt('motionVisitsByHour', `
     SELECT strftime('%Y-%m-%dT%H', started_at) as hour, COUNT(*) as count
     FROM motion_incidents
     WHERE ended_at IS NOT NULL
@@ -575,8 +646,7 @@ function getMotionVisitStats() {
     GROUP BY strftime('%Y-%m-%dT%H', started_at)
     ORDER BY hour
   `).all();
-  // Visits per day for the last 7 days (only ended incidents)
-  const byDay = d.prepare(`
+  const byDay = stmt('motionVisitsByDay', `
     SELECT date(started_at, 'localtime') as date, COUNT(*) as count
     FROM motion_incidents
     WHERE ended_at IS NOT NULL
@@ -589,7 +659,7 @@ function getMotionVisitStats() {
 
 // Recent ended visits for the event log (server-side list)
 function listRecentVisits(limit = 50) {
-  return getDb().prepare(`
+  return stmt('listRecentVisits', `
     SELECT
       mi.id,
       mi.started_at,
@@ -605,7 +675,7 @@ function listRecentVisits(limit = 50) {
 }
 
 function getLastVisitTime() {
-  const row = getDb().prepare(`
+  const row = stmt('getLastVisitTime', `
     SELECT ended_at FROM motion_incidents
     WHERE ended_at IS NOT NULL
     ORDER BY ended_at DESC LIMIT 1
@@ -627,13 +697,13 @@ function clearMotionRecordings() {
 
 // --- Audit Log ---
 function addAuditLog(userId, username, action, details, ipAddress, requestId) {
-  getDb().prepare(
+  stmt('addAuditLog',
     'INSERT INTO audit_log (user_id, username, action, details, ip_address, request_id) VALUES (?, ?, ?, ?, ?, ?)'
   ).run(userId, username, action, details || null, ipAddress || null, requestId || null);
 }
 
 function getAuditLogs(limit = 100) {
-  return getDb().prepare('SELECT * FROM audit_log ORDER BY id DESC LIMIT ?').all(limit);
+  return stmt('getAuditLogs', 'SELECT * FROM audit_log ORDER BY id DESC LIMIT ?').all(limit);
 }
 
 module.exports = {
@@ -645,6 +715,7 @@ module.exports = {
   ensureAdmin,
   findUserByUsername,
   getUser,
+  userExists,
   listUsers,
   countUsers,
   createUser,
@@ -670,7 +741,9 @@ module.exports = {
   getUnstarredMotionIncidentTotals,
   getOldestUnstarredMotionIncidents,
   deleteMotionIncident,
+  deleteMotionIncidents,
   listRecentMotionIncidents,
+  listMotionIncidentsForDate,
   listRecentVisits,
   getLastVisitTime,
   getSnapshot,

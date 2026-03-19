@@ -1,6 +1,14 @@
 require('dotenv').config();
+
+// (#12) Default to production if NODE_ENV is not set — prevents leaking
+// stack traces and internal details in error responses.
+if (!process.env.NODE_ENV) {
+  process.env.NODE_ENV = 'production';
+}
+
 const crypto = require('crypto');
 const fs = require('fs');
+const fsPromises = require('fs/promises');
 const path = require('path');
 const express = require('express');
 const session = require('express-session');
@@ -22,8 +30,10 @@ const PORT = process.env.PORT || 3000;
 const BUILD_TIME = new Date().toISOString();
 const { execSync } = require('child_process');
 
-// Motion clips directory — declared early so routes defined before line 445 can use it
+// (#22) Shared directory constants — used by both server.js and routes/admin.js
+const snapshotDir = path.join(__dirname, 'data', 'snapshots');
 const motionClipsDir = path.join(__dirname, 'data', 'motion_clips');
+fs.mkdirSync(snapshotDir, { recursive: true });
 fs.mkdirSync(motionClipsDir, { recursive: true });
 
 // Get Git commit hash if available
@@ -95,20 +105,19 @@ streamManager.startAll().then(() => {
 
 const app = express();
 
-// Trust proxy when configured (nginx / reverse proxy)
-app.use((req, res, next) => {
-  if (db.isReverseProxy()) {
-    app.set('trust proxy', 1);
-  } else {
-    app.set('trust proxy', false);
-  }
-  next();
-});
+// (#5) Trust proxy: set once at startup and refresh periodically (not per-request).
+// db.isReverseProxy() is now cached with a TTL so this is cheap to call.
+app.set('trust proxy', db.isReverseProxy() ? 1 : false);
+setInterval(() => {
+  app.set('trust proxy', db.isReverseProxy() ? 1 : false);
+}, 30_000);
 
 // Request tracing (security review fix)
 app.use(requestIdMiddleware);
 
 // Security headers
+// (#13) Enable HSTS when behind a reverse proxy (HTTPS termination at nginx/Caddy)
+const isProxy = db.isReverseProxy();
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
@@ -122,6 +131,9 @@ app.use(helmet({
       workerSrc: ["'self'", "blob:"],
     },
   },
+  strictTransportSecurity: isProxy
+    ? { maxAge: 63072000, includeSubDomains: true }
+    : false,
 }));
 
 app.use(express.json({ limit: '10mb' }));
@@ -153,32 +165,35 @@ app.rotateSessionSecret = () => {
   _sessionMiddleware = makeSessionMiddleware(newSecret);
 };
 
-// Rate limiting — create at startup, refresh in background when settings change
+// (#8) Rate limiting — create at startup, only reconstruct when settings actually change.
+// Previous approach constructed new limiter objects every 60s even if settings were the same.
+function makeLimiterKey(windowMin, max) { return `${windowMin}:${max}`; }
 function makeLoginLimiter() {
   const windowMin = parseInt(db.getSetting('login_rate_window_min')) || 15;
   const max = parseInt(db.getSetting('login_rate_max')) || 15;
-  return { limiter: rateLimit({ windowMs: windowMin * 60 * 1000, max, standardHeaders: true, legacyHeaders: false, message: 'Too many login attempts. Please try again later.' }), key: `${windowMin}:${max}` };
+  return { limiter: rateLimit({ windowMs: windowMin * 60 * 1000, max, standardHeaders: true, legacyHeaders: false, message: 'Too many login attempts. Please try again later.' }), key: makeLimiterKey(windowMin, max) };
 }
 function makeSetupLimiter() {
   const windowMin = parseInt(db.getSetting('setup_rate_window_min')) || 15;
   const max = parseInt(db.getSetting('setup_rate_max')) || 10;
-  return { limiter: rateLimit({ windowMs: windowMin * 60 * 1000, max, standardHeaders: true, legacyHeaders: false }), key: `${windowMin}:${max}` };
+  return { limiter: rateLimit({ windowMs: windowMin * 60 * 1000, max, standardHeaders: true, legacyHeaders: false }), key: makeLimiterKey(windowMin, max) };
 }
 function makeApiLimiter() {
   const windowMin = parseInt(db.getSetting('api_rate_window_min')) || 1;
   const max = parseInt(db.getSetting('api_rate_max')) || 100;
-  return { limiter: rateLimit({ windowMs: windowMin * 60 * 1000, max, standardHeaders: true, legacyHeaders: false, message: { error: 'Too many requests. Please try again later.' } }), key: `${windowMin}:${max}` };
+  return { limiter: rateLimit({ windowMs: windowMin * 60 * 1000, max, standardHeaders: true, legacyHeaders: false, message: { error: 'Too many requests. Please try again later.' } }), key: makeLimiterKey(windowMin, max) };
 }
 let _loginLimiterState = makeLoginLimiter();
 let _setupLimiterState = makeSetupLimiter();
 let _apiLimiterState = makeApiLimiter();
 setInterval(() => {
-  const login = makeLoginLimiter();
-  if (login.key !== _loginLimiterState.key) _loginLimiterState = login;
-  const setup = makeSetupLimiter();
-  if (setup.key !== _setupLimiterState.key) _setupLimiterState = setup;
-  const api = makeApiLimiter();
-  if (api.key !== _apiLimiterState.key) _apiLimiterState = api;
+  // Only check if keys changed, avoid constructing limiter objects when settings are unchanged
+  const loginKey = makeLimiterKey(parseInt(db.getSetting('login_rate_window_min')) || 15, parseInt(db.getSetting('login_rate_max')) || 15);
+  if (loginKey !== _loginLimiterState.key) _loginLimiterState = makeLoginLimiter();
+  const setupKey = makeLimiterKey(parseInt(db.getSetting('setup_rate_window_min')) || 15, parseInt(db.getSetting('setup_rate_max')) || 10);
+  if (setupKey !== _setupLimiterState.key) _setupLimiterState = makeSetupLimiter();
+  const apiKey = makeLimiterKey(parseInt(db.getSetting('api_rate_window_min')) || 1, parseInt(db.getSetting('api_rate_max')) || 100);
+  if (apiKey !== _apiLimiterState.key) _apiLimiterState = makeApiLimiter();
 }, 60_000);
 app.use('/admin/login', (req, res, next) => _loginLimiterState.limiter(req, res, next));
 app.use('/admin/setup', (req, res, next) => _setupLimiterState.limiter(req, res, next));
@@ -195,6 +210,17 @@ app.use(express.static(path.join(__dirname, 'public'), {
     }
   },
 }));
+
+// Browsers request /favicon.ico by default; serve existing PNG to avoid 404
+const faviconPath = path.join(__dirname, 'public', 'favicon.png');
+app.get('/favicon.ico', (req, res) => {
+  if (fs.existsSync(faviconPath)) {
+    res.type('png');
+    res.sendFile(faviconPath);
+  } else {
+    res.status(204).end();
+  }
+});
 
 // HLS streams — optionally require auth; start stream on demand if m3u8 missing
 app.use('/hls', (req, res, next) => {
@@ -269,12 +295,11 @@ app.get('/api/visit', (req, res) => {
 });
 
 app.use('/admin', adminRoutes);
-app.use(express.json());
+// (#19) Removed duplicate express.json() — already registered at startup with { limit: '10mb' }
 app.use('/api/recordings', recordingsRoutes);
 
 // --- Snapshots (static serving + GET; POST added after wss is created) ---
-const snapshotDir = path.join(__dirname, 'data', 'snapshots');
-fs.mkdirSync(snapshotDir, { recursive: true });
+// (#22) snapshotDir declared at top of file as shared constant
 app.use('/snapshots', express.static(snapshotDir));
 
 // Build the snapshot rate limiter once at startup with current settings.
@@ -299,6 +324,7 @@ function refreshSnapshotLimiter() { _snapshotLimiter = makeSnapshotLimiter(); }
 function getSnapStripStarred() { return Math.max(0, Math.min(20, parseInt(db.getSetting('snap_strip_starred')) || 3)); }
 function getSnapStripTotal() { return Math.max(1, Math.min(20, parseInt(db.getSetting('snap_strip_total')) || 5)); }
 
+// (#9) Optimized: fetch all starred once (1 query instead of 2), derive strip subset from it.
 function buildSnapshotsPayload() {
   const stripStarred = getSnapStripStarred();
   const stripTotal = getSnapStripTotal();
@@ -310,17 +336,18 @@ function buildSnapshotsPayload() {
     created_at: s.created_at,
     starred: s.starred === 1 || s.starred === true,
   });
-  const starredSnaps = stripStarred > 0 ? db.getStarredSnapshots(stripStarred) : [];
+  // Single query for all starred — slice for strip, full list for "all stars" panel
+  const allStarredRaw = db.getAllStarredSnapshots();
+  const starredSnaps = stripStarred > 0 ? allStarredRaw.slice(0, stripStarred) : [];
   const starredIds = new Set(starredSnaps.map(s => s.id));
   const remaining = stripTotal - starredSnaps.length;
   const latest = remaining > 0 ? db.getLatestSnapshots(stripTotal + starredSnaps.length)
     .filter(s => !starredIds.has(s.id))
     .slice(0, remaining) : [];
-  const allStarred = db.getAllStarredSnapshots().map(toObj);
   return {
     starred: starredSnaps.map(toObj),
     latest: latest.map(toObj),
-    allStarred,
+    allStarred: allStarredRaw.map(toObj),
     config: { stripStarred, stripTotal },
   };
 }
@@ -359,9 +386,9 @@ app.get('/api/motion-visits/stats', (req, res) => {
   res.json({ byHour, byDay, last_visit, visits });
 });
 
-// Public: list recent motion clips (no auth required — visible to all visitors)
+// (#2) Public: list recent motion clips — uses async fs to avoid blocking event loop.
 // Only include finalized clips (ended + file exists) so they are playable and show correct size.
-app.get('/api/motion-clips', (req, res) => {
+app.get('/api/motion-clips', async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit, 10) || 30, 100);
   const clips = db.listRecentMotionIncidents(limit);
   const out = [];
@@ -370,11 +397,16 @@ app.get('/api/motion-clips', (req, res) => {
     const filename = path.basename(c.file_path || '');
     if (!filename.endsWith('.mp4')) continue;
     const filePath = path.join(motionClipsDir, filename);
-    if (!fs.existsSync(filePath)) continue; // file missing, skip so we don't show unplayable clip
+    // (#2) Use async fs.access instead of sync existsSync
+    try {
+      await fsPromises.access(filePath);
+    } catch (_) {
+      continue; // file missing, skip so we don't show unplayable clip
+    }
     let sizeBytes = c.size_bytes;
     if (!sizeBytes || sizeBytes <= 0) {
       try {
-        const st = fs.statSync(filePath);
+        const st = await fsPromises.stat(filePath);
         sizeBytes = st.size || 0;
       } catch (_) {
         sizeBytes = 0;
@@ -417,12 +449,29 @@ app.get('/clips/:filename', (req, res) => {
 
 const server = http.createServer(app);
 
+// (#15) Request timeout — prevents slow clients from holding connections indefinitely
+server.timeout = 120_000; // 2 minutes
+server.keepAliveTimeout = 65_000; // slightly above typical proxy timeouts (60s)
+server.headersTimeout = 70_000;
+
 // --- WebSocket chat with rate limiting ---
 const chatMessages = db.getChatMessages(100);
 const MAX_CHAT_MESSAGES = 100;
 function getChatRateLimit() { return parseInt(db.getSetting('chat_rate_limit')) || 5; }
 function getChatRateWindow() { return parseInt(db.getSetting('chat_rate_window_ms')) || 1000; }
-function isChatDisabled() { return db.getSetting('chat_disabled') === 'true'; }
+
+// (#23) Cache chat_disabled setting to avoid DB hit on every chat message
+let _chatDisabledCache = db.getSetting('chat_disabled') === 'true';
+let _chatDisabledCacheTime = Date.now();
+const CHAT_DISABLED_CACHE_TTL = 10_000; // 10 seconds
+function isChatDisabled() {
+  const now = Date.now();
+  if (now - _chatDisabledCacheTime > CHAT_DISABLED_CACHE_TTL) {
+    _chatDisabledCache = db.getSetting('chat_disabled') === 'true';
+    _chatDisabledCacheTime = now;
+  }
+  return _chatDisabledCache;
+}
 
 function sanitizeChat(str) {
   return String(str)
@@ -450,15 +499,21 @@ function getViewerCount() {
   return n;
 }
 
+// (#18) Throttled broadcastStats — avoids flooding clients during high chat volume
+let _broadcastStatsTimer = null;
 function broadcastStats() {
-  const payload = JSON.stringify({
-    type: 'stats',
-    viewerCount: getViewerCount(),
-    totalChatMessages: chatMessages.length,
-  });
-  wss.clients.forEach((client) => {
-    if (client.readyState === 1) client.send(payload);
-  });
+  if (_broadcastStatsTimer) return; // already scheduled
+  _broadcastStatsTimer = setTimeout(() => {
+    _broadcastStatsTimer = null;
+    const payload = JSON.stringify({
+      type: 'stats',
+      viewerCount: getViewerCount(),
+      totalChatMessages: chatMessages.length,
+    });
+    wss.clients.forEach((client) => {
+      if (client.readyState === 1) client.send(payload);
+    });
+  }, 500); // at most once per 500ms
 }
 
 // Broadcast message deletion to all clients
@@ -681,6 +736,8 @@ function stopMotionIncident(cameraId, endedAtIso) {
   }
 }
 
+// (#10) Batch motion clip retention — fetches up to 50 clips at a time instead of 1-by-1.
+// This reduces DB queries from O(N) to O(N/50) when many clips need deletion.
 function enforceMotionClipRetention() {
   const maxCount = parseInt(db.getSetting('motion_clip_max_count'), 10) || 0;
   const maxMb = parseInt(db.getSetting('motion_clip_max_total_mb'), 10) || 0;
@@ -691,21 +748,33 @@ function enforceMotionClipRetention() {
   let bytes = totals.bytes || 0;
 
   const maxBytes = maxMb > 0 ? maxMb * 1024 * 1024 : 0;
+  const BATCH_SIZE = 50;
 
-  let safety = 500; // avoid infinite loops if something goes wrong
+  let safety = 20; // max 20 batch iterations (1000 clips total)
   while (safety-- > 0) {
     const tooManyByCount = maxCount > 0 && count > maxCount;
     const tooManyBySize = maxBytes > 0 && bytes > maxBytes;
     if (!tooManyByCount && !tooManyBySize) break;
 
-    const oldest = db.getOldestUnstarredMotionIncidents(1)[0];
-    if (!oldest) break;
+    const batch = db.getOldestUnstarredMotionIncidents(BATCH_SIZE);
+    if (!batch.length) break;
 
-    try { fs.unlinkSync(oldest.file_path); } catch (_) {}
-    db.deleteMotionIncident(oldest.id);
+    const idsToDelete = [];
+    for (const clip of batch) {
+      const overCount = maxCount > 0 && count > maxCount;
+      const overSize = maxBytes > 0 && bytes > maxBytes;
+      if (!overCount && !overSize) break;
 
-    count -= 1;
-    bytes -= oldest.size_bytes || 0;
+      try { fs.unlinkSync(clip.file_path); } catch (_) {}
+      idsToDelete.push(clip.id);
+      count -= 1;
+      bytes -= clip.size_bytes || 0;
+    }
+
+    if (idsToDelete.length > 0) {
+      db.deleteMotionIncidents(idsToDelete);
+    }
+    if (idsToDelete.length < BATCH_SIZE) break; // no more to process
   }
 }
 
@@ -977,29 +1046,39 @@ app.locals.broadcastDeleteMessages = broadcastDeleteMessages;
 app.locals.broadcastClearChat = broadcastClearChat;
 app.locals.reloadChatMessages = reloadChatMessages;
 app.locals.chatMessages = chatMessages;
+// (#22) Expose shared directory paths so admin routes use the same constants
+app.locals.snapshotDir = snapshotDir;
 
 // --- Snapshot POST (after wss so we can broadcast) ---
-app.post('/api/snapshots', snapshotRateLimitMiddleware, (req, res) => {
-  const { image, nickname, cameraName } = req.body || {};
-  if (!image || typeof image !== 'string') return res.status(400).json({ error: 'No image data' });
-  const match = image.match(/^data:image\/png;base64,(.+)$/);
-  if (!match) return res.status(400).json({ error: 'Invalid image format' });
-  const buf = Buffer.from(match[1], 'base64');
-  if (buf.length > 5 * 1024 * 1024) return res.status(413).json({ error: 'Image too large' });
-  const pngMagic = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-  if (buf.length < pngMagic.length || !buf.slice(0, pngMagic.length).equals(pngMagic)) {
-    return res.status(400).json({ error: 'Invalid image format' });
+// (#3) Uses async writeFile to avoid blocking the event loop on large PNG writes.
+// (#14) Note: A 5MB PNG as base64 is ~6.6MB string + 5MB buffer = ~17MB peak per request.
+// The 5MB limit and rate limiter mitigate abuse, but consider multipart uploads for future.
+app.post('/api/snapshots', snapshotRateLimitMiddleware, async (req, res) => {
+  try {
+    const { image, nickname, cameraName } = req.body || {};
+    if (!image || typeof image !== 'string') return res.status(400).json({ error: 'No image data' });
+    const match = image.match(/^data:image\/png;base64,(.+)$/);
+    if (!match) return res.status(400).json({ error: 'Invalid image format' });
+    const buf = Buffer.from(match[1], 'base64');
+    if (buf.length > 5 * 1024 * 1024) return res.status(413).json({ error: 'Image too large' });
+    const pngMagic = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    if (buf.length < pngMagic.length || !buf.subarray(0, pngMagic.length).equals(pngMagic)) {
+      return res.status(400).json({ error: 'Invalid image format' });
+    }
+    const filename = `snap_${Date.now()}_${crypto.randomBytes(4).toString('hex')}.png`;
+    await fsPromises.writeFile(path.join(snapshotDir, filename), buf);
+    const nick = String(nickname || 'Guest').slice(0, 30).trim() || 'Guest';
+    const cam = String(cameraName || '').slice(0, 60).trim();
+    db.addSnapshot(filename, nick, cam);
+    const payload = buildSnapshotsPayload();
+    wss.clients.forEach(client => {
+      if (client.readyState === 1) client.send(JSON.stringify({ type: 'snapshots', ...payload }));
+    });
+    res.json({ ok: true, url: `/snapshots/${filename}` });
+  } catch (err) {
+    console.error('[snapshot] Write error:', err.message);
+    res.status(500).json({ error: 'Failed to save snapshot' });
   }
-  const filename = `snap_${Date.now()}_${crypto.randomBytes(4).toString('hex')}.png`;
-  fs.writeFileSync(path.join(snapshotDir, filename), buf);
-  const nick = String(nickname || 'Guest').slice(0, 30).trim() || 'Guest';
-  const cam = String(cameraName || '').slice(0, 60).trim();
-  db.addSnapshot(filename, nick, cam);
-  const payload = buildSnapshotsPayload();
-  wss.clients.forEach(client => {
-    if (client.readyState === 1) client.send(JSON.stringify({ type: 'snapshots', ...payload }));
-  });
-  res.json({ ok: true, url: `/snapshots/${filename}` });
 });
 
 function requireSameOriginApi(req, res, next) {

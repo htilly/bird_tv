@@ -1,13 +1,13 @@
 const db = require('../db');
 
+// (#6) Use db.userExists() instead of preparing a new statement per request
 function requireLogin(req, res, next) {
   if (!req.session || !req.session.userId) {
     return res.redirect('/admin/login');
   }
 
   // Re-validate user exists in database (security review fix)
-  const user = db.getDb().prepare('SELECT id FROM users WHERE id = ?').get(req.session.userId);
-  if (!user) {
+  if (!db.userExists(req.session.userId)) {
     // User was deleted - invalidate session
     req.session.destroy();
     return res.redirect('/admin/login?msg=Session+invalid');
