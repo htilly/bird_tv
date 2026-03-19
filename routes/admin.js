@@ -36,14 +36,18 @@ function ffmpegOptionsFromBody(body) {
   if (body.ffmpeg_crf != null) o.crf = body.ffmpeg_crf === '' ? DEFAULT_FFMPEG_OPTIONS.crf : Number(body.ffmpeg_crf);
   if (body.ffmpeg_pix_fmt != null) o.pix_fmt = body.ffmpeg_pix_fmt;
   if (body.ffmpeg_g != null) o.g = body.ffmpeg_g === '' ? DEFAULT_FFMPEG_OPTIONS.g : Number(body.ffmpeg_g) || 16;
-  if (body.ffmpeg_keyint_min != null) o.keyint_min = body.ffmpeg_keyint_min === '' ? DEFAULT_FFMPEG_OPTIONS.keyint_min : Number(body.ffmpeg_keyint_min) || 8;
+  if (body.ffmpeg_keyint_min != null) o.keyint_min = body.ffmpeg_keyint_min === '' ? DEFAULT_FFMPEG_OPTIONS.keyint_min : Number(body.ffmpeg_keyint_min) || 16;
   if (body.ffmpeg_force_key_frames != null) o.force_key_frames = body.ffmpeg_force_key_frames;
+  if (body.ffmpeg_input_fps != null) o.input_fps = body.ffmpeg_input_fps === '' ? DEFAULT_FFMPEG_OPTIONS.input_fps : (Number(body.ffmpeg_input_fps) === 0 ? 0 : Number(body.ffmpeg_input_fps) || DEFAULT_FFMPEG_OPTIONS.input_fps);
+  if (body.ffmpeg_scale_vf != null) o.scale_vf = body.ffmpeg_scale_vf === '' ? DEFAULT_FFMPEG_OPTIONS.scale_vf : body.ffmpeg_scale_vf;
+  if (body.ffmpeg_color_range != null) o.color_range = body.ffmpeg_color_range === '' ? DEFAULT_FFMPEG_OPTIONS.color_range : body.ffmpeg_color_range;
   if (body.ffmpeg_audio_codec != null) o.audio_codec = body.ffmpeg_audio_codec;
   if (body.ffmpeg_audio_channels != null) o.audio_channels = body.ffmpeg_audio_channels === '' ? 1 : Number(body.ffmpeg_audio_channels) || 1;
   if (body.ffmpeg_audio_sample_rate != null) o.audio_sample_rate = body.ffmpeg_audio_sample_rate === '' ? 44100 : Number(body.ffmpeg_audio_sample_rate) || 44100;
-  if (body.ffmpeg_hls_time != null) o.hls_time = body.ffmpeg_hls_time === '' ? 2 : Number(body.ffmpeg_hls_time) || 2;
-  if (body.ffmpeg_hls_list_size != null) o.hls_list_size = body.ffmpeg_hls_list_size === '' ? 3 : Number(body.ffmpeg_hls_list_size) || 3;
+  if (body.ffmpeg_hls_time != null) o.hls_time = body.ffmpeg_hls_time === '' ? DEFAULT_FFMPEG_OPTIONS.hls_time : Number(body.ffmpeg_hls_time) || 2;
+  if (body.ffmpeg_hls_list_size != null) o.hls_list_size = body.ffmpeg_hls_list_size === '' ? DEFAULT_FFMPEG_OPTIONS.hls_list_size : Number(body.ffmpeg_hls_list_size) || 6;
   if (body.ffmpeg_hls_flags != null) o.hls_flags = body.ffmpeg_hls_flags;
+  if (body.ffmpeg_fps_mode != null) o.fps_mode = body.ffmpeg_fps_mode;
   if (body.ffmpeg_extra_input_args != null) o.extra_input_args = body.ffmpeg_extra_input_args;
   if (body.ffmpeg_extra_output_args != null) o.extra_output_args = body.ffmpeg_extra_output_args;
   return o;
@@ -80,7 +84,11 @@ function ffmpegFormSection(opts) {
         <div class="form-row">
           <div>
             <label for="ffmpeg-fflags">Input fflags</label>
-            <input type="text" id="ffmpeg-fflags" name="ffmpeg_fflags" value="${v('fflags')}" placeholder="flush_packets">
+            <input type="text" id="ffmpeg-fflags" name="ffmpeg_fflags" value="${v('fflags')}" placeholder="genpts+discardcorrupt">
+          </div>
+          <div>
+            <label for="ffmpeg-input-fps">Input FPS (-r)</label>
+            <input type="number" id="ffmpeg-input-fps" name="ffmpeg_input_fps" value="${v('input_fps')}" min="0" placeholder="8" title="0 = use camera default">
           </div>
           <div>
             <label for="ffmpeg-max-delay">Max delay (s)</label>
@@ -123,6 +131,24 @@ function ffmpegFormSection(opts) {
             <label for="ffmpeg-pix-fmt">Pixel format</label>
             <input type="text" id="ffmpeg-pix-fmt" name="ffmpeg_pix_fmt" value="${v('pix_fmt')}" placeholder="yuv420p">
           </div>
+          <div>
+            <label for="ffmpeg-fps-mode">Frame rate mode</label>
+            <select id="ffmpeg-fps-mode" name="ffmpeg_fps_mode">
+              <option value="vfr" ${opts.fps_mode === 'vfr' ? 'selected' : ''}>vfr (variable — recommended)</option>
+              <option value="cfr" ${opts.fps_mode === 'cfr' ? 'selected' : ''}>cfr (constant)</option>
+              <option value="passthrough" ${opts.fps_mode === 'passthrough' ? 'selected' : ''}>passthrough</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-row">
+          <div style="flex:1;">
+            <label for="ffmpeg-scale-vf">Scale filter (-vf)</label>
+            <input type="text" id="ffmpeg-scale-vf" name="ffmpeg_scale_vf" value="${v('scale_vf')}" placeholder="scale=in_range=full:out_range=tv" style="width:100%;">
+          </div>
+          <div>
+            <label for="ffmpeg-color-range">Color range</label>
+            <input type="text" id="ffmpeg-color-range" name="ffmpeg_color_range" value="${v('color_range')}" placeholder="tv">
+          </div>
         </div>
         <div class="form-row">
           <div>
@@ -131,7 +157,7 @@ function ffmpegFormSection(opts) {
           </div>
           <div>
             <label for="ffmpeg-keyint-min">Keyint min</label>
-            <input type="number" id="ffmpeg-keyint-min" name="ffmpeg_keyint_min" value="${v('keyint_min')}" min="1" placeholder="8">
+            <input type="number" id="ffmpeg-keyint-min" name="ffmpeg_keyint_min" value="${v('keyint_min')}" min="1" placeholder="16">
           </div>
           <div style="flex:1;">
             <label for="ffmpeg-force-key-frames">Force key frames</label>
@@ -169,7 +195,7 @@ function ffmpegFormSection(opts) {
           </div>
           <div style="flex:1;">
             <label for="ffmpeg-hls-flags">HLS flags</label>
-            <input type="text" id="ffmpeg-hls-flags" name="ffmpeg_hls_flags" value="${v('hls_flags')}" placeholder="delete_segments+append_list">
+            <input type="text" id="ffmpeg-hls-flags" name="ffmpeg_hls_flags" value="${v('hls_flags')}" placeholder="delete_segments">
           </div>
         </div>
         <div style="margin-top:0.75rem;">
@@ -478,7 +504,7 @@ router.get('/cameras/new', requireLogin, (req, res) => {
   `));
 });
 
-router.post('/cameras', requireLogin, verifyCsrf, auditLog('camera.create'), (req, res) => {
+router.post('/cameras', requireLogin, verifyCsrf, auditLog('camera.create'), async (req, res) => {
   const { display_name, rtsp_host, rtsp_port, rtsp_path, rtsp_username, rtsp_password } = req.body || {};
   if (!display_name || !rtsp_host) return res.redirect('/admin/cameras/new');
   const port = parseInt(rtsp_port) || 554;
@@ -486,7 +512,7 @@ router.post('/cameras', requireLogin, verifyCsrf, auditLog('camera.create'), (re
   try {
     const id = db.createCamera(display_name.trim(), rtsp_host.trim(), port, (rtsp_path || '').trim(), (rtsp_username || '').trim(), (rtsp_password || '').trim(), JSON.stringify(ffmpegOpts));
     const cam = db.getCamera(id);
-    streamManager.startStream(id, cam);
+    await streamManager.startStream(id, cam);
     res.redirect('/admin');
   } catch (err) {
     res.redirect('/admin/cameras/new?msg=' + encodeURIComponent(err.message));
@@ -544,7 +570,7 @@ router.get('/cameras/:id/edit', requireLogin, (req, res) => {
   `));
 });
 
-router.post('/cameras/:id', requireLogin, verifyCsrf, auditLog('camera.update'), (req, res) => {
+router.post('/cameras/:id', requireLogin, verifyCsrf, auditLog('camera.update'), async (req, res) => {
   const id = Number(req.params.id);
   const c = db.getCamera(id);
   if (!c) return res.redirect('/admin');
@@ -555,19 +581,19 @@ router.post('/cameras/:id', requireLogin, verifyCsrf, auditLog('camera.update'),
   const ffmpegOpts = { ...DEFAULT_FFMPEG_OPTIONS, ...ffmpegOptionsFromBody(req.body || {}) };
   try {
     db.updateCamera(id, display_name.trim(), rtsp_host.trim(), port, (rtsp_path || '').trim(), (rtsp_username || '').trim(), (password || '').trim(), JSON.stringify(ffmpegOpts));
-    streamManager.stopStream(id);
+    await streamManager.stopStream(id);
     const updated = db.getCamera(id);
-    streamManager.startStream(id, updated);
+    await streamManager.startStream(id, updated);
     res.redirect('/admin');
   } catch (err) {
     res.redirect(`/admin/cameras/${id}/edit?msg=` + encodeURIComponent(err.message));
   }
 });
 
-router.post('/cameras/:id/delete', requireLogin, verifyCsrf, auditLog('camera.delete'), (req, res) => {
+router.post('/cameras/:id/delete', requireLogin, verifyCsrf, auditLog('camera.delete'), async (req, res) => {
   const id = Number(req.params.id);
   if (db.getCamera(id)) {
-    streamManager.stopStream(id);
+    await streamManager.stopStream(id);
     db.deleteCamera(id);
   }
   res.redirect('/admin');

@@ -11,7 +11,7 @@ describe('streamManager.parseFfmpegOptions', () => {
     const opts = parseFfmpegOptions({});
     assert.strictEqual(opts.rtsp_transport, 'tcp');
     assert.strictEqual(opts.video_codec, 'libx264');
-    assert.strictEqual(opts.preset, 'ultrafast');
+    assert.strictEqual(opts.preset, 'veryfast');
   });
 
   it('returns defaults when ffmpeg_options is null', () => {
@@ -25,7 +25,7 @@ describe('streamManager.parseFfmpegOptions', () => {
     });
     assert.strictEqual(opts.rtsp_transport, 'udp');
     assert.strictEqual(opts.crf, 23);
-    assert.strictEqual(opts.preset, 'ultrafast');
+    assert.strictEqual(opts.preset, 'veryfast');
   });
 
   it('falls back to defaults on invalid JSON', () => {
@@ -50,7 +50,7 @@ describe('streamManager.buildFfmpegArgs', () => {
     assert.ok(args.includes('-c:v'));
     assert.ok(args.includes('libx264'));
     assert.ok(args.includes('-preset'));
-    assert.ok(args.includes('ultrafast'));
+    assert.ok(args.includes('veryfast'));
   });
 
   it('uses -c:v copy when video_codec is copy', () => {

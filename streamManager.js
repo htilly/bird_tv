@@ -1,7 +1,25 @@
-const { spawn } = require('child_process');
+const { spawn, execSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const db = require('./db');
+
+// -fps_mode was added in FFmpeg 5.0; Debian 11 (and similar) ship 4.x
+let fpsModeSupported = null;
+function getFpsModeSupported() {
+  if (fpsModeSupported !== null) return fpsModeSupported;
+  try {
+    const out = execSync('ffmpeg -hide_banner -fps_mode vfr -f null - 2>&1', {
+      timeout: 3000,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    fpsModeSupported = !out.includes("Unrecognized option 'fps_mode'");
+  } catch (e) {
+    const out = (e.stdout || '') + (e.stderr || '');
+    fpsModeSupported = !out.includes("Unrecognized option 'fps_mode'");
+  }
+  return fpsModeSupported;
+}
 
 const hlsDir = path.join(__dirname, 'hls');
 const processes = new Map();
@@ -11,26 +29,32 @@ const logs = new Map(); // cameraId -> string[]
 
 const DEFAULT_FFMPEG_OPTIONS = {
   rtsp_transport: 'tcp',
+  use_wallclock_as_timestamps: 1,
   reconnect: 1,
   reconnect_streamed: 1,
   reconnect_delay_max: 5,
-  fflags: 'flush_packets',
+  fflags: 'genpts+discardcorrupt',
+  avoid_negative_ts: 'make_zero',
   max_delay: 2,
   flags: '-global_header',
+  input_fps: 8,
   video_codec: 'libx264',
-  preset: 'ultrafast',
+  preset: 'veryfast',
   tune: 'zerolatency',
   crf: 28,
   pix_fmt: 'yuv420p',
+  scale_vf: 'scale=in_range=full:out_range=tv',
+  color_range: 'tv',
   g: 16,
-  keyint_min: 8,
-  force_key_frames: 'expr:gte(t,n_forced*2)',
-  audio_codec: 'aac',
+  keyint_min: 16,
+  force_key_frames: '',
+  audio_codec: 'none',
   audio_channels: 1,
   audio_sample_rate: 44100,
-  hls_time: 1,
-  hls_list_size: 2,
-  hls_flags: 'delete_segments+append_list',
+  hls_time: 2,
+  hls_list_size: 6,
+  hls_flags: 'delete_segments',
+  fps_mode: 'vfr',
   extra_input_args: '',
   extra_output_args: '',
 };
@@ -71,21 +95,30 @@ function buildFfmpegArgs(rtspUrl, outBase, options, enableMotionFrames = false) 
   const args = [];
 
   pushOpt(args, '-rtsp_transport', o.rtsp_transport);
+  if (o.use_wallclock_as_timestamps) pushOpt(args, '-use_wallclock_as_timestamps', '1');
+  pushOpt(args, '-fflags', o.fflags);
+  if (o.avoid_negative_ts) pushOpt(args, '-avoid_negative_ts', o.avoid_negative_ts);
+  if (o.input_fps) pushOpt(args, '-r', o.input_fps);
   pushOpt(args, '-i', rtspUrl);
   pushOpt(args, '-reconnect', o.reconnect);
   pushOpt(args, '-reconnect_streamed', o.reconnect_streamed);
   pushOpt(args, '-reconnect_delay_max', o.reconnect_delay_max);
-  pushOpt(args, '-fflags', o.fflags);
   pushOpt(args, '-max_delay', o.max_delay);
   pushOpt(args, '-flags', o.flags);
 
   const extraInput = parseExtraArgs(o.extra_input_args);
   for (let i = 0; i < extraInput.length; i++) args.push(extraInput[i]);
 
+  // Frame rate mode: 'vfr' passes through camera timing as-is (FFmpeg 5.0+).
+  // Skip on older FFmpeg (e.g. 4.x in Debian 11) which does not support -fps_mode.
+  if (o.fps_mode && getFpsModeSupported()) pushOpt(args, '-fps_mode', o.fps_mode);
+
   // HLS output (main stream for viewers)
   if (o.video_codec === 'copy') {
     pushOpt(args, '-c:v', 'copy');
   } else {
+    if (o.scale_vf) pushOpt(args, '-vf', o.scale_vf);
+    if (o.color_range) pushOpt(args, '-color_range', o.color_range);
     pushOpt(args, '-c:v', o.video_codec || 'libx264');
     pushOpt(args, '-preset', o.preset);
     pushOpt(args, '-tune', o.tune);
@@ -93,7 +126,7 @@ function buildFfmpegArgs(rtspUrl, outBase, options, enableMotionFrames = false) 
     pushOpt(args, '-pix_fmt', o.pix_fmt);
     pushOpt(args, '-g', o.g);
     pushOpt(args, '-keyint_min', o.keyint_min);
-    pushOpt(args, '-force_key_frames', o.force_key_frames);
+    if (o.force_key_frames) pushOpt(args, '-force_key_frames', o.force_key_frames);
   }
 
   if (o.audio_codec && o.audio_codec !== 'none') {
@@ -131,14 +164,16 @@ function buildFfmpegArgs(rtspUrl, outBase, options, enableMotionFrames = false) 
   return args;
 }
 
-function startStream(cameraId, camera, enableMotionFrames = false) {
+async function startStream(cameraId, camera, enableMotionFrames = false) {
   const rtspUrl = typeof camera === 'string' ? camera : camera.rtsp_url;
   if (!db.validateRtspUrl(rtspUrl)) {
     console.error(`Camera ${cameraId}: refusing to start — invalid RTSP URL`);
     return null;
   }
 
-  stopStream(cameraId);
+  // Wait for any existing process to fully exit before spawning a new one.
+  // This prevents multiple ffmpeg instances writing to the same HLS files.
+  await stopStream(cameraId);
   stopping.delete(cameraId);
   ensureHlsDir();
   const outBase = path.join(hlsDir, `cam-${cameraId}`);
@@ -175,27 +210,23 @@ function startStream(cameraId, camera, enableMotionFrames = false) {
     if (wasIntentionalStop) return;
     if (signal === 'SIGTERM') return; // container/process shutting down, don't restart
     if (code === 0 && code !== null) return; // clean exit
-    setTimeout(() => {
+    setTimeout(async () => {
       const cam = db.getCamera(cameraId);
-      if (cam) startStream(cameraId, cam);
+      if (cam) await startStream(cameraId, cam);
     }, 5000);
   });
   processes.set(cameraId, child);
   return child;
 }
 
+/**
+ * Stop the stream for a camera and wait for the ffmpeg process to fully exit.
+ * Returns a Promise so callers can await the actual exit before starting a replacement,
+ * preventing multiple ffmpeg instances from writing to the same HLS files simultaneously.
+ */
 function stopStream(cameraId) {
   const child = processes.get(cameraId);
-  if (child && child.kill) {
-    stopping.add(cameraId); // mark as intentional stop
-    // Graceful: SIGTERM first, force SIGKILL after 5s
-    child.kill('SIGTERM');
-    const killTimer = setTimeout(() => {
-      try { child.kill('SIGKILL'); } catch (_) {}
-    }, 5000);
-    child.once('exit', () => clearTimeout(killTimer));
-    processes.delete(cameraId);
-  }
+  // Delete HLS files for this camera regardless of whether a process is running
   const prefix = `cam-${cameraId}`;
   try {
     fs.readdirSync(hlsDir).forEach((f) => {
@@ -204,15 +235,33 @@ function stopStream(cameraId) {
       }
     });
   } catch (_) {}
+
+  if (!child || !child.kill) return Promise.resolve();
+
+  return new Promise((resolve) => {
+    stopping.add(cameraId); // mark as intentional stop
+    processes.delete(cameraId);
+
+    // Resolve as soon as the process exits
+    child.once('exit', () => {
+      resolve();
+    });
+
+    // Graceful: SIGTERM first, force SIGKILL after 5s
+    child.kill('SIGTERM');
+    setTimeout(() => {
+      try { child.kill('SIGKILL'); } catch (_) {}
+    }, 5000);
+  });
 }
 
-function stopAll() {
-  for (const id of processes.keys()) stopStream(id);
+async function stopAll() {
+  await Promise.all([...processes.keys()].map((id) => stopStream(id)));
 }
 
-function startAll() {
+async function startAll() {
   const cameras = db.listCameras();
-  for (const c of cameras) startStream(c.id, c);
+  for (const c of cameras) await startStream(c.id, c);
 }
 
 function isRunning(cameraId) {

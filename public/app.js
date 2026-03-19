@@ -101,15 +101,30 @@
         maxBufferLength: 4,
         maxMaxBufferLength: 8,
       });
-      hls.loadSource(src);
       hls.attachMedia(video);
-      hls.on(Hls.Events.MANIFEST_PARSED, () => videoOverlay.classList.add('hidden'));
+      let manifestRetries = 0;
+      const maxManifestRetries = 5;
+      function tryLoadSource() {
+        hls.loadSource(src);
+      }
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        manifestRetries = 0;
+        videoOverlay.classList.add('hidden');
+      });
       hls.on(Hls.Events.ERROR, (_, data) => {
         if (data.fatal) {
+          const code = data.response?.code;
+          const isManifestNotReady = (code === 404 || code === 503) && data.type === Hls.ErrorTypes.NETWORK_ERROR;
+          if (isManifestNotReady && manifestRetries < maxManifestRetries) {
+            manifestRetries += 1;
+            setTimeout(tryLoadSource, 3000);
+            return;
+          }
           videoOverlay.classList.remove('hidden');
           videoOverlay.querySelector('p').textContent = 'Stream not available. Try another camera.';
         }
       });
+      tryLoadSource();
     } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
       video.src = src;
       videoOverlay.classList.add('hidden');

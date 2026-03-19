@@ -9,7 +9,7 @@ let isShuttingDown = false;
  * Start motion detector that reads frames from the ffmpeg HLS stream.
  * This avoids opening a duplicate RTSP connection.
  */
-function startMotionDetector() {
+async function startMotionDetector() {
   if (motionProcess) {
     console.log('[motion-manager] Motion detector already running');
     return;
@@ -26,8 +26,9 @@ function startMotionDetector() {
   const cameraId = camera.id;
 
   // Restart the stream with motion frame output enabled
+  // await ensures old process is fully dead before new one starts
   console.log(`[motion-manager] Starting camera ${cameraId} with motion frame output`);
-  const ffmpegProc = streamManager.startStream(cameraId, camera, true);
+  const ffmpegProc = await streamManager.startStream(cameraId, camera, true);
 
   if (!ffmpegProc || !ffmpegProc.stdout) {
     console.error('[motion-manager] Failed to start ffmpeg with motion frames');

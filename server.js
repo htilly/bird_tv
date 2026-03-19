@@ -77,18 +77,21 @@ if (!VAPID_PUBLIC_KEY) {
     console.log('Generated and persisted VAPID keys to database.');
   }
 }
-streamManager.startAll();
+streamManager.startAll().then(() => {
+  console.log('All camera streams started.');
 
-// Start motion detector if enabled
-// Check DB setting first, fall back to env var
-const enableMotion = db.getSetting('enable_motion_detector') === 'true' ||
-                     process.env.ENABLE_MOTION_DETECTOR === 'true';
-if (enableMotion) {
-  console.log('[motion] Motion detector enabled — starting in 3s');
-  setTimeout(() => motionManager.startMotionDetector(), 3000);
-} else {
-  console.log('[motion] Motion detector disabled (set enable_motion_detector=true in DB settings to enable)');
-}
+  // Start motion detector if enabled (after streams are fully up)
+  const enableMotion = db.getSetting('enable_motion_detector') === 'true' ||
+                       process.env.ENABLE_MOTION_DETECTOR === 'true';
+  if (enableMotion) {
+    console.log('[motion] Motion detector enabled — starting in 3s');
+    setTimeout(() => motionManager.startMotionDetector(), 3000);
+  } else {
+    console.log('[motion] Motion detector disabled (set enable_motion_detector=true in DB settings to enable)');
+  }
+}).catch((err) => {
+  console.error('Error starting camera streams:', err);
+});
 
 const app = express();
 
@@ -114,7 +117,7 @@ app.use(helmet({
       styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
       fontSrc: ["'self'", "https://fonts.gstatic.com"],
       imgSrc: ["'self'", "data:"],
-      connectSrc: ["'self'", "ws:", "wss:"],
+      connectSrc: ["'self'", "ws:", "wss:", "https://cdn.jsdelivr.net"],
       mediaSrc: ["'self'", "blob:"],
       workerSrc: ["'self'", "blob:"],
     },
@@ -193,11 +196,28 @@ app.use(express.static(path.join(__dirname, 'public'), {
   },
 }));
 
-// HLS streams — optionally require auth
+// HLS streams — optionally require auth; start stream on demand if m3u8 missing
 app.use('/hls', (req, res, next) => {
   if (db.getSetting('require_auth_streams') === 'true') {
     if (!req.session || !req.session.userId) {
       return res.status(401).json({ error: 'Authentication required' });
+    }
+  }
+  const m = req.path.match(/\/cam-(\d+)\.m3u8$/);
+  if (m && req.method === 'GET') {
+    const cameraId = m[1];
+    const m3u8Path = path.join(streamManager.hlsDir, `cam-${cameraId}.m3u8`);
+    if (!fs.existsSync(m3u8Path)) {
+      if (!streamManager.isRunning(cameraId)) {
+        const cam = db.getCamera(cameraId);
+        if (cam) {
+          streamManager.startStream(cameraId, cam).catch((err) =>
+            console.error(`[hls] Failed to start stream for camera ${cameraId}:`, err.message)
+          );
+        }
+      }
+      res.setHeader('Retry-After', '3');
+      return res.status(503).send('Stream not ready; retry in a few seconds.');
     }
   }
   next();
@@ -1001,11 +1021,11 @@ app.use((err, req, res, next) => {
 });
 
 // --- Graceful shutdown ---
-function shutdown(signal) {
+async function shutdown(signal) {
   console.log(`\n${signal} received. Shutting down gracefully...`);
   clearInterval(wsPingInterval);
   motionManager.stopMotionDetector();
-  streamManager.stopAll();
+  await streamManager.stopAll();
 
   // Stop any in-progress motion incident recordings (best-effort).
   for (const cameraId of activeMotionIncidents.keys()) {
