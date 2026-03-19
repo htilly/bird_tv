@@ -64,6 +64,10 @@
   const playbackEndingOverlay = document.getElementById('playback-ending-overlay');
   const playbackEndingText = document.getElementById('playback-ending-text');
 
+  const motionStatusPill = document.getElementById('motion-status-pill');
+  const motionStatusDot = document.getElementById('motion-status-dot');
+  const motionStatusText = document.getElementById('motion-status-text');
+
   function enterPlaybackMode(timestamp, cameraId) {
     isPlaybackMode = true;
     playbackCameraId = cameraId || selectedCameraId;
@@ -96,6 +100,7 @@
     if (playbackEndingOverlay) {
       playbackEndingOverlay.classList.add('hidden');
     }
+    video.onended = null;
   }
 
   function handlePlaybackEnd() {
@@ -933,4 +938,45 @@
       })
       .catch(() => {});
   }
+
+  // ---------------------------------------------------------------------------
+  // Motion status indicator
+  // ---------------------------------------------------------------------------
+  function setMotionStatus(state, text) {
+    if (motionStatusText) motionStatusText.textContent = text;
+    if (motionStatusDot) motionStatusDot.className = 'motion-status-dot ' + state;
+    if (motionStatusPill) motionStatusPill.className = 'motion-status-pill ' + state;
+  }
+
+  let motionWs = null;
+  function connectMotionWs() {
+    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    motionWs = new WebSocket(protocol + '//' + location.host + '/motion-ws');
+    motionWs.onmessage = (ev) => {
+      try {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === 'status') {
+          if (msg.warming_up) {
+            setMotionStatus('warming', 'Motion: ' + (msg.message || 'Warming up...'));
+          } else if (msg.connected === false) {
+            setMotionStatus('disconnected', 'Motion: ' + (msg.message || 'Offline'));
+          } else {
+            setMotionStatus('connected', 'Motion: ' + (msg.message || 'Active'));
+          }
+        } else if (msg.type === 'backend_connected') {
+          setMotionStatus('connected', 'Motion: Online');
+        } else if (msg.type === 'backend_disconnected') {
+          setMotionStatus('offline', 'Motion: Detector offline');
+        }
+      } catch (_) {}
+    };
+    motionWs.onclose = () => {
+      setMotionStatus('offline', 'Motion: Disconnected');
+      setTimeout(connectMotionWs, 5000);
+    };
+    motionWs.onerror = () => {
+      setMotionStatus('offline', 'Motion: Error');
+    };
+  }
+  connectMotionWs();
 })();

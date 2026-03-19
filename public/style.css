@@ -166,6 +166,36 @@ body {
   object-fit: contain;
 }
 
+.motion-status-pill {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  background: rgba(255,255,255,0.7);
+  border: 1px solid rgba(0,0,0,0.1);
+  border-radius: 20px;
+  padding: 0.25em 0.75em;
+}
+
+.motion-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #9ca3af;
+  flex-shrink: 0;
+}
+
+.motion-status-dot.connected  { background: var(--leaf); box-shadow: 0 0 0 3px rgba(74,222,128,0.25); }
+.motion-status-dot.warming    { background: #facc15; animation: pulse-dot 1s infinite; }
+.motion-status-dot.disconnected,
+.motion-status-dot.offline    { background: #f87171; }
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.4; }
+}
+
 /* --- Stats strip (kid-friendly) --- */
 .stats-strip {
   display: flex;
@@ -391,8 +421,8 @@ body {
 }
 
 .playback-timestamp-icon {
-  width: 1.2rem;
-  height: 1.2rem;
+  width: 2.4rem;
+  height: 2.4rem;
   object-fit: contain;
 }
 
@@ -418,8 +448,8 @@ body {
 }
 
 .playback-ending-logo {
-  width: 80px;
-  height: 80px;
+  width: 160px;
+  height: 160px;
   object-fit: contain;
   animation: playback-logo-bounce 1s ease-in-out infinite;
 }
