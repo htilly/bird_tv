@@ -57,6 +57,7 @@
   let isPlaybackMode = false;
   let playbackCameraId = null;
   let playbackCountdownTimer = null;
+  let currentPlayButton = null;
 
   const livePill = document.getElementById('live-pill');
   const playbackTimestamp = document.getElementById('playback-timestamp');
@@ -101,6 +102,11 @@
       playbackEndingOverlay.classList.add('hidden');
     }
     video.onended = null;
+    if (currentPlayButton) {
+      currentPlayButton.textContent = '▶ Play';
+      currentPlayButton.disabled = false;
+      currentPlayButton = null;
+    }
   }
 
   function handlePlaybackEnd() {
@@ -799,6 +805,11 @@
   });
 
   function playClip(camId, startTime, endTime, btn, filename, timestamp) {
+    if (currentPlayButton && currentPlayButton !== btn) {
+      currentPlayButton.textContent = '▶ Play';
+      currentPlayButton.disabled = false;
+    }
+    currentPlayButton = btn;
     btn.textContent = '⏳ Loading…';
     btn.disabled = true;
     if (currentPlaybackKey) {
