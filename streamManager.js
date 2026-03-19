@@ -242,16 +242,21 @@ async function stopStream(cameraId) {
 
   return new Promise((resolve) => {
     stopping.add(cameraId); // mark as intentional stop
-    processes.delete(cameraId);
 
     // (#20) Safety timeout — resolve even if ffmpeg ignores signals
+    const maybeDeleteProcess = () => {
+      // Only delete if this camera still points to the same child.
+      if (processes.get(cameraId) === child) processes.delete(cameraId);
+    };
     const safetyTimer = setTimeout(() => {
+      maybeDeleteProcess();
       resolve();
     }, 12_000);
 
     // Resolve as soon as the process exits
     child.once('exit', () => {
       clearTimeout(safetyTimer);
+      maybeDeleteProcess();
       resolve();
     });
 
