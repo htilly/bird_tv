@@ -36,14 +36,18 @@ function ffmpegOptionsFromBody(body) {
   if (body.ffmpeg_crf != null) o.crf = body.ffmpeg_crf === '' ? DEFAULT_FFMPEG_OPTIONS.crf : Number(body.ffmpeg_crf);
   if (body.ffmpeg_pix_fmt != null) o.pix_fmt = body.ffmpeg_pix_fmt;
   if (body.ffmpeg_g != null) o.g = body.ffmpeg_g === '' ? DEFAULT_FFMPEG_OPTIONS.g : Number(body.ffmpeg_g) || 16;
-  if (body.ffmpeg_keyint_min != null) o.keyint_min = body.ffmpeg_keyint_min === '' ? DEFAULT_FFMPEG_OPTIONS.keyint_min : Number(body.ffmpeg_keyint_min) || 8;
+  if (body.ffmpeg_keyint_min != null) o.keyint_min = body.ffmpeg_keyint_min === '' ? DEFAULT_FFMPEG_OPTIONS.keyint_min : Number(body.ffmpeg_keyint_min) || 16;
   if (body.ffmpeg_force_key_frames != null) o.force_key_frames = body.ffmpeg_force_key_frames;
+  if (body.ffmpeg_input_fps != null) o.input_fps = body.ffmpeg_input_fps === '' ? DEFAULT_FFMPEG_OPTIONS.input_fps : (Number(body.ffmpeg_input_fps) === 0 ? 0 : Number(body.ffmpeg_input_fps) || DEFAULT_FFMPEG_OPTIONS.input_fps);
+  if (body.ffmpeg_scale_vf != null) o.scale_vf = body.ffmpeg_scale_vf === '' ? DEFAULT_FFMPEG_OPTIONS.scale_vf : body.ffmpeg_scale_vf;
+  if (body.ffmpeg_color_range != null) o.color_range = body.ffmpeg_color_range === '' ? DEFAULT_FFMPEG_OPTIONS.color_range : body.ffmpeg_color_range;
   if (body.ffmpeg_audio_codec != null) o.audio_codec = body.ffmpeg_audio_codec;
   if (body.ffmpeg_audio_channels != null) o.audio_channels = body.ffmpeg_audio_channels === '' ? 1 : Number(body.ffmpeg_audio_channels) || 1;
   if (body.ffmpeg_audio_sample_rate != null) o.audio_sample_rate = body.ffmpeg_audio_sample_rate === '' ? 44100 : Number(body.ffmpeg_audio_sample_rate) || 44100;
-  if (body.ffmpeg_hls_time != null) o.hls_time = body.ffmpeg_hls_time === '' ? 2 : Number(body.ffmpeg_hls_time) || 2;
-  if (body.ffmpeg_hls_list_size != null) o.hls_list_size = body.ffmpeg_hls_list_size === '' ? 3 : Number(body.ffmpeg_hls_list_size) || 3;
+  if (body.ffmpeg_hls_time != null) o.hls_time = body.ffmpeg_hls_time === '' ? DEFAULT_FFMPEG_OPTIONS.hls_time : Number(body.ffmpeg_hls_time) || 2;
+  if (body.ffmpeg_hls_list_size != null) o.hls_list_size = body.ffmpeg_hls_list_size === '' ? DEFAULT_FFMPEG_OPTIONS.hls_list_size : Number(body.ffmpeg_hls_list_size) || 6;
   if (body.ffmpeg_hls_flags != null) o.hls_flags = body.ffmpeg_hls_flags;
+  if (body.ffmpeg_fps_mode != null) o.fps_mode = body.ffmpeg_fps_mode;
   if (body.ffmpeg_extra_input_args != null) o.extra_input_args = body.ffmpeg_extra_input_args;
   if (body.ffmpeg_extra_output_args != null) o.extra_output_args = body.ffmpeg_extra_output_args;
   return o;
@@ -80,7 +84,11 @@ function ffmpegFormSection(opts) {
         <div class="form-row">
           <div>
             <label for="ffmpeg-fflags">Input fflags</label>
-            <input type="text" id="ffmpeg-fflags" name="ffmpeg_fflags" value="${v('fflags')}" placeholder="flush_packets">
+            <input type="text" id="ffmpeg-fflags" name="ffmpeg_fflags" value="${v('fflags')}" placeholder="genpts+discardcorrupt">
+          </div>
+          <div>
+            <label for="ffmpeg-input-fps">Input FPS (-r)</label>
+            <input type="number" id="ffmpeg-input-fps" name="ffmpeg_input_fps" value="${v('input_fps')}" min="0" placeholder="8" title="0 = use camera default">
           </div>
           <div>
             <label for="ffmpeg-max-delay">Max delay (s)</label>
@@ -123,6 +131,24 @@ function ffmpegFormSection(opts) {
             <label for="ffmpeg-pix-fmt">Pixel format</label>
             <input type="text" id="ffmpeg-pix-fmt" name="ffmpeg_pix_fmt" value="${v('pix_fmt')}" placeholder="yuv420p">
           </div>
+          <div>
+            <label for="ffmpeg-fps-mode">Frame rate mode</label>
+            <select id="ffmpeg-fps-mode" name="ffmpeg_fps_mode">
+              <option value="vfr" ${opts.fps_mode === 'vfr' ? 'selected' : ''}>vfr (variable — recommended)</option>
+              <option value="cfr" ${opts.fps_mode === 'cfr' ? 'selected' : ''}>cfr (constant)</option>
+              <option value="passthrough" ${opts.fps_mode === 'passthrough' ? 'selected' : ''}>passthrough</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-row">
+          <div style="flex:1;">
+            <label for="ffmpeg-scale-vf">Scale filter (-vf)</label>
+            <input type="text" id="ffmpeg-scale-vf" name="ffmpeg_scale_vf" value="${v('scale_vf')}" placeholder="scale=in_range=full:out_range=tv" style="width:100%;">
+          </div>
+          <div>
+            <label for="ffmpeg-color-range">Color range</label>
+            <input type="text" id="ffmpeg-color-range" name="ffmpeg_color_range" value="${v('color_range')}" placeholder="tv">
+          </div>
         </div>
         <div class="form-row">
           <div>
@@ -131,7 +157,7 @@ function ffmpegFormSection(opts) {
           </div>
           <div>
             <label for="ffmpeg-keyint-min">Keyint min</label>
-            <input type="number" id="ffmpeg-keyint-min" name="ffmpeg_keyint_min" value="${v('keyint_min')}" min="1" placeholder="8">
+            <input type="number" id="ffmpeg-keyint-min" name="ffmpeg_keyint_min" value="${v('keyint_min')}" min="1" placeholder="16">
           </div>
           <div style="flex:1;">
             <label for="ffmpeg-force-key-frames">Force key frames</label>
@@ -169,7 +195,7 @@ function ffmpegFormSection(opts) {
           </div>
           <div style="flex:1;">
             <label for="ffmpeg-hls-flags">HLS flags</label>
-            <input type="text" id="ffmpeg-hls-flags" name="ffmpeg_hls_flags" value="${v('hls_flags')}" placeholder="delete_segments+append_list">
+            <input type="text" id="ffmpeg-hls-flags" name="ffmpeg_hls_flags" value="${v('hls_flags')}" placeholder="delete_segments">
           </div>
         </div>
         <div style="margin-top:0.75rem;">
@@ -195,11 +221,25 @@ function escapeHtml(s) {
     .replace(/'/g, '&#x27;');
 }
 
+function getDateLocale() {
+  const setting = db.getSetting('datetime_locale') || 'eu';
+  return setting === 'us' ? 'en-US' : 'sv-SE';
+}
+
 function friendlyDate(iso) {
   if (!iso) return '';
   try {
     const d = new Date(iso + 'Z');
-    return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+    const locale = getDateLocale();
+    if (locale === 'sv-SE') {
+      // EU style: YYYY-MM-DD for consistency
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${y}-${m}-${day}`;
+    }
+    // US style: e.g. "Sep 23, 2026"
+    return d.toLocaleDateString(locale, { year: 'numeric', month: 'short', day: 'numeric' });
   } catch (_) { return iso; }
 }
 
@@ -235,6 +275,7 @@ function nav(active) {
   const items = [
     { id: 'cameras', label: 'Cameras', icon: '&#x1F3A5;', href: '/admin' },
     { id: 'snapshots', label: 'Snapshots', icon: '&#x1F4F7;', href: '/admin/snapshots' },
+    { id: 'motion-clips', label: 'Motion Clips', icon: '&#x1F3AC;', href: '/admin/motion-clips' },
     { id: 'visitors', label: 'Visitors', icon: '&#x1F4CA;', href: '/admin/visitors' },
     { id: 'users', label: 'Users', icon: '&#x1F465;', href: '/admin/users' },
     { id: 'chat', label: 'Chat', icon: '&#x1F4AC;', href: '/admin/chat' },
@@ -477,7 +518,7 @@ router.get('/cameras/new', requireLogin, (req, res) => {
   `));
 });
 
-router.post('/cameras', requireLogin, verifyCsrf, auditLog('camera.create'), (req, res) => {
+router.post('/cameras', requireLogin, verifyCsrf, auditLog('camera.create'), async (req, res) => {
   const { display_name, rtsp_host, rtsp_port, rtsp_path, rtsp_username, rtsp_password } = req.body || {};
   if (!display_name || !rtsp_host) return res.redirect('/admin/cameras/new');
   const port = parseInt(rtsp_port) || 554;
@@ -485,7 +526,7 @@ router.post('/cameras', requireLogin, verifyCsrf, auditLog('camera.create'), (re
   try {
     const id = db.createCamera(display_name.trim(), rtsp_host.trim(), port, (rtsp_path || '').trim(), (rtsp_username || '').trim(), (rtsp_password || '').trim(), JSON.stringify(ffmpegOpts));
     const cam = db.getCamera(id);
-    streamManager.startStream(id, cam);
+    await streamManager.startStream(id, cam);
     res.redirect('/admin');
   } catch (err) {
     res.redirect('/admin/cameras/new?msg=' + encodeURIComponent(err.message));
@@ -543,7 +584,7 @@ router.get('/cameras/:id/edit', requireLogin, (req, res) => {
   `));
 });
 
-router.post('/cameras/:id', requireLogin, verifyCsrf, auditLog('camera.update'), (req, res) => {
+router.post('/cameras/:id', requireLogin, verifyCsrf, auditLog('camera.update'), async (req, res) => {
   const id = Number(req.params.id);
   const c = db.getCamera(id);
   if (!c) return res.redirect('/admin');
@@ -554,19 +595,19 @@ router.post('/cameras/:id', requireLogin, verifyCsrf, auditLog('camera.update'),
   const ffmpegOpts = { ...DEFAULT_FFMPEG_OPTIONS, ...ffmpegOptionsFromBody(req.body || {}) };
   try {
     db.updateCamera(id, display_name.trim(), rtsp_host.trim(), port, (rtsp_path || '').trim(), (rtsp_username || '').trim(), (password || '').trim(), JSON.stringify(ffmpegOpts));
-    streamManager.stopStream(id);
+    await streamManager.stopStream(id);
     const updated = db.getCamera(id);
-    streamManager.startStream(id, updated);
+    await streamManager.startStream(id, updated);
     res.redirect('/admin');
   } catch (err) {
     res.redirect(`/admin/cameras/${id}/edit?msg=` + encodeURIComponent(err.message));
   }
 });
 
-router.post('/cameras/:id/delete', requireLogin, verifyCsrf, auditLog('camera.delete'), (req, res) => {
+router.post('/cameras/:id/delete', requireLogin, verifyCsrf, auditLog('camera.delete'), async (req, res) => {
   const id = Number(req.params.id);
   if (db.getCamera(id)) {
-    streamManager.stopStream(id);
+    await streamManager.stopStream(id);
     db.deleteCamera(id);
   }
   res.redirect('/admin');
@@ -829,6 +870,74 @@ router.post('/snapshots/bulk-delete', requireLogin, verifyCsrf, auditLog('snapsh
   res.redirect('/admin/snapshots?msg=' + encodeURIComponent(`Deleted ${ids.length} snapshot${ids.length !== 1 ? 's' : ''}`));
 });
 
+// --- Motion Clips (motion incident recordings) ---
+router.get('/motion-clips', requireLogin, (req, res) => {
+  const clips = db.listRecentMotionIncidents(30);
+  const totals = db.getUnstarredMotionIncidentTotals();
+  const totalMb = totals.bytes / (1024 * 1024);
+
+  res.send(layout('Motion Clips', nav('motion-clips'), `
+    <h1>Motion Clips</h1>
+    <p class="visitors-desc" style="margin-top:0;">
+      Auto-cleanup keeps <strong>unstarred</strong> clips within the limits set in <a href="/admin/settings">Settings</a>.
+    </p>
+    <div class="visitor-stats-cards" style="grid-template-columns: repeat(3, minmax(0, 1fr));">
+      <div class="visitor-card">
+        <span class="visitor-card-value">${escapeHtml(String(totals.count))}</span>
+        <span class="visitor-card-label">Unstarred clips (ended)</span>
+      </div>
+      <div class="visitor-card">
+        <span class="visitor-card-value">${escapeHtml(totalMb.toFixed(1))} MB</span>
+        <span class="visitor-card-label">Unstarred total size</span>
+      </div>
+      <div class="visitor-card">
+        <span class="visitor-card-value">${escapeHtml(String(clips.length))}</span>
+        <span class="visitor-card-label">Most recent shown</span>
+      </div>
+    </div>
+
+    <div style="margin-top:1rem;">
+      <div class="rec-list" style="padding:0.75rem;border:1px solid rgba(0,0,0,0.06);border-radius:var(--radius);">
+        ${clips.length ? '' : '<p class="rec-empty">No motion clips yet.</p>'}
+        ${clips.map((c) => {
+          const started = escapeHtml(c.started_at || '');
+          const ended = escapeHtml(c.ended_at || '');
+          const mb = (c.size_bytes / (1024 * 1024));
+          const mbStr = Number.isFinite(mb) ? mb.toFixed(1) : '0.0';
+          const isStarred = !!c.starred;
+          const btnText = isStarred ? '★ Starred' : '⭐ Star';
+          return `
+            <div class="rec-clip" style="border:0;padding:0.5rem 0;">
+              <div class="rec-clip-info">
+                <span class="rec-time">${started.slice(11, 19)}</span>
+                <span class="rec-dur">${ended ? ended.slice(11, 19) : '...'}</span>
+                <span class="rec-size">${mbStr} MB</span>
+                <span class="rec-size" style="margin-left:0.5rem;opacity:0.8;">${escapeHtml(c.camera_name || '')}</span>
+              </div>
+              <form method="post" action="/admin/motion-clips/${c.id}/star" style="display:inline;margin-left:0.5rem;" data-confirm="Update star?">
+                ${csrfField(req)}
+                <input type="hidden" name="starred" value="${isStarred ? 0 : 1}">
+                <button type="submit" class="btn btn-small ${isStarred ? 'btn-ghost' : 'btn-primary'}">${btnText}</button>
+              </form>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    </div>
+  `));
+});
+
+router.post('/motion-clips/:id/star', requireLogin, verifyCsrf, auditLog('motion_clips.star'), (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.redirect('/admin/motion-clips');
+  const incident = db.getMotionIncident(id);
+  if (!incident) return res.redirect('/admin/motion-clips');
+
+  const starred = String(req.body.starred) === '1';
+  db.setMotionIncidentStar(id, starred);
+  res.redirect('/admin/motion-clips');
+});
+
 // --- Settings ---
 
 router.get('/settings', requireLogin, (req, res) => {
@@ -847,7 +956,10 @@ router.get('/settings', requireLogin, (req, res) => {
   const apiRateWindow = settings.api_rate_window_min || '1';
   const snapStripStarred = settings.snap_strip_starred || '3';
   const snapStripTotal = settings.snap_strip_total || '5';
+  const motionClipMaxCount = settings.motion_clip_max_count !== undefined ? settings.motion_clip_max_count : '200';
+  const motionClipMaxTotalMb = settings.motion_clip_max_total_mb !== undefined ? settings.motion_clip_max_total_mb : '5000';
   const siteName = settings.site_name || 'Birdcam Live';
+  const datetimeLocale = settings.datetime_locale || 'eu';
   res.send(layout('Settings', nav('settings'), `
     <h1>Settings</h1>
     ${req.query.msg ? `<div class="admin-msg admin-msg-ok">${escapeHtml(req.query.msg)}</div>` : ''}
@@ -860,6 +972,19 @@ router.get('/settings', requireLogin, (req, res) => {
           <input type="text" id="site-name" name="site_name" value="${escapeHtml(siteName)}" maxlength="60" style="width:100%;max-width:320px">
         </div>
         <p class="field-hint">Shown in the browser tab, header logo text, and admin panel. Default: Birdcam Live.</p>
+      </fieldset>
+      <fieldset class="settings-group">
+        <legend>Time & Date</legend>
+        <div>
+          <label for="datetime-locale">Display format</label>
+          <select id="datetime-locale" name="datetime_locale">
+            <option value="eu" ${datetimeLocale === 'eu' ? 'selected' : ''}>EU – 24-hour, day-month-year</option>
+            <option value="us" ${datetimeLocale === 'us' ? 'selected' : ''}>US – 12-hour, month-day-year</option>
+          </select>
+        </div>
+        <p class="field-hint">
+          Controls how dates and times are shown in the admin UI (user list, audit log, chat moderation, etc.).
+        </p>
       </fieldset>
       <fieldset class="settings-group">
         <legend>Network / Proxy</legend>
@@ -987,6 +1112,53 @@ router.get('/settings', requireLogin, (req, res) => {
           Default: 3 starred + up to 5 total.
         </p>
       </fieldset>
+      <fieldset class="settings-group">
+        <legend>Motion Clip Retention</legend>
+        <div class="form-row">
+          <div>
+            <label for="motion-clip-max-count">Max clips to keep (unstarred)</label>
+            <input type="number" id="motion-clip-max-count" name="motion_clip_max_count" value="${escapeHtml(motionClipMaxCount)}" min="0" max="100000">
+          </div>
+          <div>
+            <label for="motion-clip-max-total-mb">Max total size (MB, unstarred)</label>
+            <input type="number" id="motion-clip-max-total-mb" name="motion_clip_max_total_mb" value="${escapeHtml(motionClipMaxTotalMb)}" min="0" max="1000000">
+          </div>
+        </div>
+        <p class="field-hint">
+          After each motion incident, old unstarred clips are deleted until both limits are satisfied.
+          Set a value to <code>0</code> to disable that constraint.
+        </p>
+      </fieldset>
+      <fieldset class="settings-group">
+        <legend>Detection</legend>
+        <p class="field-hint" style="margin-top:0;">
+          Live controls for the motion detector runtime configuration.
+          Changes are applied immediately and affect which incidents get recorded.
+        </p>
+        <div class="form-row" style="align-items:flex-end;">
+          <div>
+            <label for="motion-sensitivity">Sensitivity</label>
+            <select id="motion-sensitivity">
+              <option value="2">Low</option>
+              <option value="3" selected>Medium</option>
+              <option value="4">High</option>
+            </select>
+          </div>
+          <div style="min-width:240px;">
+            <label for="motion-cooldown">Notification cooldown</label>
+            <input type="range" id="motion-cooldown" min="5" max="120" value="30" step="5" style="width:100%;">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-top:0.25rem;">
+              <span class="field-hint" style="margin:0;padding:0;opacity:0.85;">5s</span>
+              <span class="field-hint" id="motion-cooldown-val" style="margin:0;padding:0;opacity:0.95;font-weight:700;">30s</span>
+              <span class="field-hint" style="margin:0;padding:0;opacity:0.85;">2 min</span>
+            </div>
+          </div>
+        </div>
+        <div style="margin-top:0.75rem;">
+          <button type="button" class="btn btn-small btn-primary" id="motion-apply">Apply to detector</button>
+          <span class="field-hint" id="motion-live-status" style="margin-left:0.75rem;">Connecting to detector…</span>
+        </div>
+      </fieldset>
       <div class="form-actions">
         <button type="submit" class="btn btn-primary">Save settings</button>
         <a href="/admin" class="btn btn-ghost">Cancel</a>
@@ -1000,6 +1172,33 @@ router.get('/settings', requireLogin, (req, res) => {
         <input type="hidden" name="_csrf" value="${getCsrfToken(req)}">
         <button type="submit" class="btn btn-danger">Invalidate all sessions</button>
       </form>
+    </fieldset>
+
+    <fieldset class="settings-group settings-danger-zone" style="margin-top:1.5rem;">
+      <legend>&#9888; Danger Zone</legend>
+      <p class="field-hint" style="padding-left:0;margin:0 0 1rem;">These actions are permanent and cannot be undone.</p>
+
+      <div class="danger-zone-row">
+        <div class="danger-zone-desc">
+          <strong>Clear visitor history</strong>
+          <span class="field-hint" style="padding-left:0;display:block;margin-top:0.2rem;">Deletes all <strong>human</strong> visitor tracking data (cookie-based page visits). Stats on the Visitors page will reset to zero. Does not affect bird visit recordings.</span>
+        </div>
+        <form method="post" action="/admin/reset-visitor-stats" data-confirm="This will permanently delete all human visitor history. Continue?">
+          <input type="hidden" name="_csrf" value="${getCsrfToken(req)}">
+          <button type="submit" class="btn btn-danger">Clear visitor history</button>
+        </form>
+      </div>
+
+      <div class="danger-zone-row" style="margin-top:1rem;padding-top:1rem;border-top:1px solid rgba(220,38,38,0.15);">
+        <div class="danger-zone-desc">
+          <strong>Clear bird visit recordings</strong>
+          <span class="field-hint" style="padding-left:0;display:block;margin-top:0.2rem;">Deletes all <strong>bird visit</strong> recordings from the database and removes all MP4 files from disk, including starred clips. Also resets the birds 24h / 7d stats. Does not affect human visitor data.</span>
+        </div>
+        <form method="post" action="/admin/reset-motion-stats" data-confirm="This will permanently delete all bird visit recordings and their video files, including starred clips. Continue?">
+          <input type="hidden" name="_csrf" value="${getCsrfToken(req)}">
+          <button type="submit" class="btn btn-danger">Clear bird visit recordings</button>
+        </form>
+      </div>
     </fieldset>
 
     <fieldset class="settings-group" style="margin-top:1.5rem;">
@@ -1038,6 +1237,95 @@ router.get('/settings', requireLogin, (req, res) => {
     </div>
 
     <script src="/admin/settings-debug.js"></script>
+    <script>
+      (function () {
+        const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = proto + '//' + location.host + '/motion-ws';
+        const ws = new WebSocket(wsUrl);
+
+        const sensitivityEl = document.getElementById('motion-sensitivity');
+        const cooldownEl = document.getElementById('motion-cooldown');
+        const cooldownValEl = document.getElementById('motion-cooldown-val');
+        const applyBtn = document.getElementById('motion-apply');
+        const statusEl = document.getElementById('motion-live-status');
+
+        // Matches the mapping used in /experimental/
+        const MIN_AREA_MAP = { 2: 4000, 3: 1500, 4: 600 };
+        const thresholdFromSensitivity = (sens) => Number(sens) >= 4 ? 0.001 : 0.005;
+
+        function setCooldownVal(v) {
+          const n = Number(v);
+          if (Number.isFinite(n)) cooldownValEl.textContent = n + 's';
+        }
+
+        function currentConfigPayload() {
+          const sens = Number(sensitivityEl.value);
+          const cooldownSec = Number(cooldownEl.value);
+          return {
+            type: 'config_update',
+            min_area: MIN_AREA_MAP[sens] || 1500,
+            threshold_fraction: thresholdFromSensitivity(sens),
+            cooldown_sec: cooldownSec,
+          };
+        }
+
+        function sendConfigUpdate() {
+          if (!ws || ws.readyState !== WebSocket.OPEN) return;
+          ws.send(JSON.stringify(currentConfigPayload()));
+        }
+
+        ws.addEventListener('open', function () {
+          statusEl.textContent = 'Connected to detector';
+        });
+
+        ws.addEventListener('message', function (ev) {
+          let msg = null;
+          try { msg = JSON.parse(ev.data); } catch (_) {}
+          if (!msg) return;
+
+          if (msg.type === 'config') {
+            // Update cooldown
+            if (msg.cooldown_sec !== undefined) {
+              cooldownEl.value = Number(msg.cooldown_sec);
+              setCooldownVal(cooldownEl.value);
+            }
+
+            // Update sensitivity by nearest min_area bucket
+            if (msg.min_area !== undefined) {
+              const minArea = Number(msg.min_area);
+              const candidates = Object.keys(MIN_AREA_MAP).map(s => ({
+                sens: Number(s),
+                dist: Math.abs(MIN_AREA_MAP[s] - minArea),
+              }));
+              candidates.sort((a, b) => a.dist - b.dist);
+              const best = candidates[0] && Number.isFinite(candidates[0].sens) ? candidates[0].sens : Number(sensitivityEl.value);
+              if (best) sensitivityEl.value = String(best);
+            }
+
+            statusEl.textContent = 'Detector config applied';
+          }
+
+          if (msg.type === 'backend_connected') {
+            statusEl.textContent = 'Detector backend online';
+          }
+        });
+
+        ws.addEventListener('close', function () {
+          statusEl.textContent = 'Detector connection closed (refresh page to reconnect)';
+        });
+
+        ws.addEventListener('error', function () {
+          statusEl.textContent = 'Detector connection error';
+        });
+
+        applyBtn.addEventListener('click', function () {
+          statusEl.textContent = 'Applying…';
+          sendConfigUpdate();
+        });
+
+        cooldownEl.addEventListener('input', function () { setCooldownVal(this.value); });
+      })();
+    </script>
   `));
 });
 
@@ -1055,6 +1343,14 @@ router.post('/settings', requireLogin, verifyCsrf, auditLog('settings.update'), 
   const snapRateWindow = Math.max(10, Math.min(3600, parseInt(req.body.snapshot_rate_window_sec) || 60));
   const snapStripStarred = Math.max(0, Math.min(20, parseInt(req.body.snap_strip_starred) || 3));
   const snapStripTotal = Math.max(1, Math.min(20, parseInt(req.body.snap_strip_total) || 5));
+  const motionClipMaxCountRaw = parseInt(req.body.motion_clip_max_count, 10);
+  const motionClipMaxTotalMbRaw = parseInt(req.body.motion_clip_max_total_mb, 10);
+  const motionClipMaxCount = Number.isFinite(motionClipMaxCountRaw)
+    ? Math.max(0, Math.min(100000, motionClipMaxCountRaw))
+    : 200;
+  const motionClipMaxTotalMb = Number.isFinite(motionClipMaxTotalMbRaw)
+    ? Math.max(0, Math.min(1000000, motionClipMaxTotalMbRaw))
+    : 5000;
   db.setSetting('login_rate_max', String(loginRateMax));
   db.setSetting('login_rate_window_min', String(loginRateWindow));
   db.setSetting('setup_rate_max', String(setupRateMax));
@@ -1069,8 +1365,12 @@ router.post('/settings', requireLogin, verifyCsrf, auditLog('settings.update'), 
   db.setSetting('api_rate_window_min', String(apiRateWindow));
   db.setSetting('snap_strip_starred', String(snapStripStarred));
   db.setSetting('snap_strip_total', String(snapStripTotal));
+  db.setSetting('motion_clip_max_count', String(motionClipMaxCount));
+  db.setSetting('motion_clip_max_total_mb', String(motionClipMaxTotalMb));
   const siteName = String(req.body.site_name || 'Birdcam Live').trim().slice(0, 60) || 'Birdcam Live';
   db.setSetting('site_name', siteName);
+   const datetimeLocale = req.body.datetime_locale === 'us' ? 'us' : 'eu';
+   db.setSetting('datetime_locale', datetimeLocale);
   res.redirect('/admin/settings?msg=Settings+saved');
 });
 
@@ -1080,6 +1380,19 @@ router.post('/invalidate-sessions', requireLogin, verifyCsrf, auditLog('sessions
   req.session.destroy(() => res.redirect('/admin/login?msg=All+sessions+invalidated'));
 });
 
+// --- Danger Zone: reset stats ---
+router.post('/reset-visitor-stats', requireLogin, verifyCsrf, auditLog('stats.reset_visitors'), (req, res) => {
+  db.clearVisitorHistory();
+  res.redirect('/admin/settings?msg=Visitor+history+cleared');
+});
+
+router.post('/reset-motion-stats', requireLogin, verifyCsrf, auditLog('stats.reset_motion'), (req, res) => {
+  const filePaths = db.clearMotionRecordings();
+  // Best-effort delete MP4 files from disk
+  filePaths.forEach(fp => { try { fs.unlinkSync(fp); } catch (_) {} });
+  res.redirect('/admin/settings?msg=Motion+recordings+cleared');
+});
+
 // --- Audit Log ---
 
 router.get('/audit', requireLogin, (req, res) => {
@@ -1087,7 +1400,9 @@ router.get('/audit', requireLogin, (req, res) => {
   const logs = db.getAuditLogs(Math.min(limit, 500)); // Max 500 entries
 
   const logRows = logs.map(log => {
-    const timestamp = new Date(log.timestamp).toLocaleString('sv-SE');
+    const timestamp = new Date(log.timestamp).toLocaleString(getDateLocale(), {
+      hour12: db.getSetting('datetime_locale') === 'us',
+    });
     const user = log.username ? escapeHtml(log.username) : '<em>unauthenticated</em>';
     const actionClass = log.action.includes('delete') ? 'audit-action-danger' :
                         log.action.includes('create') || log.action.includes('login') ? 'audit-action-success' :
@@ -1240,7 +1555,7 @@ router.get('/chat', requireLogin, (req, res) => {
       <td>${m.id}</td>
       <td>${escapeHtml(m.nickname)}</td>
       <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(m.text)}</td>
-      <td style="font-size:0.85em;color:#999;">${new Date(m.time).toLocaleString('sv-SE')}</td>
+      <td style="font-size:0.85em;color:#999;">${new Date(m.time).toLocaleString(getDateLocale(), { hour12: db.getSetting('datetime_locale') === 'us' })}</td>
       <td style="font-family:monospace;font-size:0.85em;">${escapeHtml(m.ip_address || '-')}</td>
       <td class="actions-cell">
         <form method="post" action="/admin/chat/messages/${m.id}/delete" style="display:inline;">
@@ -1265,7 +1580,7 @@ router.get('/chat', requireLogin, (req, res) => {
       <td style="font-family:monospace;">${escapeHtml(b.ip_address)}</td>
       <td>${escapeHtml(b.reason || '-')}</td>
       <td>${escapeHtml(b.banned_by || '-')}</td>
-      <td style="font-size:0.85em;color:#999;">${new Date(b.created_at).toLocaleString('sv-SE')}</td>
+      <td style="font-size:0.85em;color:#999;">${new Date(b.created_at).toLocaleString(getDateLocale(), { hour12: db.getSetting('datetime_locale') === 'us' })}</td>
       <td class="actions-cell">
         <form method="post" action="/admin/chat/unban" style="display:inline;">
           ${csrfField(req)}

@@ -42,6 +42,19 @@ function init() {
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS motion_incidents (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      camera_id INTEGER NOT NULL,
+      started_at TEXT NOT NULL,
+      ended_at TEXT,
+      file_path TEXT NOT NULL,
+      size_bytes INTEGER NOT NULL DEFAULT 0,
+      starred INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now')),
+      last_motion_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_motion_incidents_camera_started_at ON motion_incidents(camera_id, started_at);
+    CREATE INDEX IF NOT EXISTS idx_motion_incidents_ended_starred ON motion_incidents(ended_at, starred);
   `);
 }
 
@@ -75,6 +88,26 @@ function migrate() {
   const tables = d.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='settings'").get();
   if (!tables) {
     d.exec(`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
+  }
+
+  // Motion incidents (motion clip retention + stars)
+  const motionTable = d.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='motion_incidents'").get();
+  if (!motionTable) {
+    d.exec(`
+      CREATE TABLE motion_incidents (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        camera_id INTEGER NOT NULL,
+        started_at TEXT NOT NULL,
+        ended_at TEXT,
+        file_path TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL DEFAULT 0,
+        starred INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT DEFAULT (datetime('now')),
+        last_motion_at TEXT
+      );
+      CREATE INDEX idx_motion_incidents_camera_started_at ON motion_incidents(camera_id, started_at);
+      CREATE INDEX idx_motion_incidents_ended_starred ON motion_incidents(ended_at, starred);
+    `);
   }
 
   // Snapshots
@@ -168,12 +201,30 @@ function migrate() {
       CREATE INDEX idx_audit_action ON audit_log(action);
     `);
   }
+
+  // Migrate hls_time and hls_list_size to low-latency defaults in stored ffmpeg_options.
+  // Cameras created before this change may have hls_time:2, hls_list_size:3 saved in the DB
+  // which would override the new DEFAULT_FFMPEG_OPTIONS values.
+  const cameras = d.prepare('SELECT id, ffmpeg_options FROM cameras').all();
+  const updateOpts = d.prepare('UPDATE cameras SET ffmpeg_options = ? WHERE id = ?');
+  for (const cam of cameras) {
+    try {
+      const opts = cam.ffmpeg_options ? JSON.parse(cam.ffmpeg_options) : {};
+      let changed = false;
+      if (opts.hls_time === 2)      { opts.hls_time = 1;      changed = true; }
+      if (opts.hls_list_size === 3) { opts.hls_list_size = 2; changed = true; }
+      if (changed) updateOpts.run(JSON.stringify(opts), cam.id);
+    } catch (_) {}
+  }
 }
 
 // --- Settings ---
 const DEFAULT_SETTINGS = {
   reverse_proxy: 'false',
   require_auth_streams: 'false',
+  // Date/time display preferences (admin + public UI)
+  // "eu" = 24h, day-month-year; "us" = 12h, month-day-year
+  datetime_locale: 'eu',
   login_rate_window_min: '15',
   login_rate_max: '15',
   setup_rate_window_min: '15',
@@ -185,6 +236,9 @@ const DEFAULT_SETTINGS = {
   snapshot_rate_window_sec: '60',
   api_rate_max: '100',
   api_rate_window_min: '1',
+  // Motion clip retention (0 disables a constraint)
+  motion_clip_max_count: '200',
+  motion_clip_max_total_mb: '5000',
 };
 
 function getSetting(key) {
@@ -441,6 +495,136 @@ function getVisitorStats() {
   return { uniqueToday, uniqueWeek, uniqueMonth, daily };
 }
 
+// --- Motion incidents (motion clips) ---
+function addMotionIncident(cameraId, startedAtIso, filePath) {
+  const d = getDb();
+  const r = d.prepare(
+    'INSERT INTO motion_incidents (camera_id, started_at, file_path) VALUES (?, ?, ?)'
+  ).run(cameraId, startedAtIso, filePath);
+  return r.lastInsertRowid;
+}
+
+function updateMotionIncidentLastMotion(id, lastMotionAtIso) {
+  getDb().prepare('UPDATE motion_incidents SET last_motion_at = ? WHERE id = ?').run(lastMotionAtIso, id);
+}
+
+function endMotionIncident(id, endedAtIso, sizeBytes) {
+  getDb().prepare(
+    'UPDATE motion_incidents SET ended_at = ?, size_bytes = ? WHERE id = ?'
+  ).run(endedAtIso, sizeBytes || 0, id);
+}
+
+function setMotionIncidentStar(id, starred) {
+  getDb().prepare(
+    'UPDATE motion_incidents SET starred = ? WHERE id = ?'
+  ).run(starred ? 1 : 0, id);
+  const row = getDb().prepare('SELECT id, starred FROM motion_incidents WHERE id = ?').get(id);
+  return row || null;
+}
+
+function getMotionIncident(id) {
+  return getDb().prepare('SELECT * FROM motion_incidents WHERE id = ?').get(id);
+}
+
+function getUnstarredMotionIncidentTotals() {
+  const row = getDb().prepare(`
+    SELECT
+      COUNT(*) as n,
+      COALESCE(SUM(size_bytes), 0) as bytes
+    FROM motion_incidents
+    WHERE ended_at IS NOT NULL AND starred = 0
+  `).get();
+  return { count: row.n, bytes: row.bytes };
+}
+
+function getOldestUnstarredMotionIncidents(limit = 1) {
+  return getDb().prepare(`
+    SELECT id, file_path, size_bytes
+    FROM motion_incidents
+    WHERE ended_at IS NOT NULL AND starred = 0
+    ORDER BY started_at ASC
+    LIMIT ?
+  `).all(limit);
+}
+
+function deleteMotionIncident(id) {
+  getDb().prepare('DELETE FROM motion_incidents WHERE id = ?').run(id);
+}
+
+function listRecentMotionIncidents(limit = 30) {
+  return getDb().prepare(`
+    SELECT
+      mi.*,
+      c.display_name as camera_name
+    FROM motion_incidents mi
+    LEFT JOIN cameras c ON c.id = mi.camera_id
+    ORDER BY mi.started_at DESC
+    LIMIT ?
+  `).all(limit);
+}
+
+// --- Motion visit stats (for chart) ---
+function getMotionVisitStats() {
+  const d = getDb();
+  // Visits per hour for the last 24h (only ended incidents)
+  const byHour = d.prepare(`
+    SELECT strftime('%Y-%m-%dT%H', started_at) as hour, COUNT(*) as count
+    FROM motion_incidents
+    WHERE ended_at IS NOT NULL
+      AND datetime(started_at) >= datetime('now', '-24 hours')
+    GROUP BY strftime('%Y-%m-%dT%H', started_at)
+    ORDER BY hour
+  `).all();
+  // Visits per day for the last 7 days (only ended incidents)
+  const byDay = d.prepare(`
+    SELECT date(started_at, 'localtime') as date, COUNT(*) as count
+    FROM motion_incidents
+    WHERE ended_at IS NOT NULL
+      AND datetime(started_at) >= datetime('now', '-7 days')
+    GROUP BY date(started_at, 'localtime')
+    ORDER BY date
+  `).all();
+  return { byHour, byDay };
+}
+
+// Recent ended visits for the event log (server-side list)
+function listRecentVisits(limit = 50) {
+  return getDb().prepare(`
+    SELECT
+      mi.id,
+      mi.started_at,
+      mi.ended_at,
+      mi.starred,
+      c.display_name as camera_name
+    FROM motion_incidents mi
+    LEFT JOIN cameras c ON c.id = mi.camera_id
+    WHERE mi.ended_at IS NOT NULL
+    ORDER BY mi.started_at DESC
+    LIMIT ?
+  `).all(limit);
+}
+
+function getLastVisitTime() {
+  const row = getDb().prepare(`
+    SELECT ended_at FROM motion_incidents
+    WHERE ended_at IS NOT NULL
+    ORDER BY ended_at DESC LIMIT 1
+  `).get();
+  return row ? row.ended_at : null;
+}
+
+// --- Clear stats ---
+function clearVisitorHistory() {
+  getDb().prepare('DELETE FROM visits').run();
+}
+
+function clearMotionRecordings() {
+  // Returns all file_path values before deleting so caller can remove files from disk
+  const rows = getDb().prepare('SELECT file_path FROM motion_incidents').all();
+  getDb().prepare('DELETE FROM motion_incidents').run();
+  return rows.map(r => r.file_path).filter(Boolean);
+}
+
 // --- Audit Log ---
 function addAuditLog(userId, username, action, details, ipAddress, requestId) {
   getDb().prepare(
@@ -478,6 +662,17 @@ module.exports = {
   isReverseProxy,
   recordVisit,
   getVisitorStats,
+  addMotionIncident,
+  updateMotionIncidentLastMotion,
+  endMotionIncident,
+  setMotionIncidentStar,
+  getMotionIncident,
+  getUnstarredMotionIncidentTotals,
+  getOldestUnstarredMotionIncidents,
+  deleteMotionIncident,
+  listRecentMotionIncidents,
+  listRecentVisits,
+  getLastVisitTime,
   getSnapshot,
   addSnapshot,
   getLatestSnapshots,
@@ -497,6 +692,9 @@ module.exports = {
   removeBan,
   isIpBanned,
   listBans,
+  getMotionVisitStats,
+  clearVisitorHistory,
+  clearMotionRecordings,
   addAuditLog,
   getAuditLogs,
 };

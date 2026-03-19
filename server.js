@@ -9,8 +9,10 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const { WebSocketServer } = require('ws');
 const http = require('http');
+const { spawn } = require('child_process');
 const db = require('./db');
 const streamManager = require('./streamManager');
+const motionManager = require('./motionManager');
 const adminRoutes = require('./routes/admin');
 const recordingsRoutes = require('./routes/recordings');
 const { requestIdMiddleware } = require('./middleware/requestId');
@@ -18,17 +20,25 @@ const { auditLog } = require('./middleware/audit');
 
 const PORT = process.env.PORT || 3000;
 const BUILD_TIME = new Date().toISOString();
+const { execSync } = require('child_process');
+
+// Motion clips directory — declared early so routes defined before line 445 can use it
+const motionClipsDir = path.join(__dirname, 'data', 'motion_clips');
+fs.mkdirSync(motionClipsDir, { recursive: true });
 
 // Get Git commit hash if available
 let GIT_COMMIT = process.env.GIT_COMMIT || null;
 
+// Truncate to 7 chars (short hash)
+if (GIT_COMMIT && GIT_COMMIT.length > 7) {
+  GIT_COMMIT = GIT_COMMIT.slice(0, 7);
+}
+
 // If not set via env var, try to detect from git (local development)
 if (!GIT_COMMIT || GIT_COMMIT === 'unknown') {
   try {
-    const { execSync } = require('child_process');
-    GIT_COMMIT = execSync('git rev-parse --short HEAD 2>/dev/null', { encoding: 'utf8' }).trim();
+    GIT_COMMIT = execSync('git rev-parse --short HEAD', { encoding: 'utf8', cwd: __dirname }).trim();
   } catch (e) {
-    // Not in a git repo or git not available
     GIT_COMMIT = null;
   }
 }
@@ -50,7 +60,38 @@ if (!SESSION_SECRET) {
     console.log('Generated and persisted SESSION_SECRET to database.');
   }
 }
-streamManager.startAll();
+
+// VAPID keys for Web Push — auto-generate and persist like session secret
+let VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || '';
+let VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || '';
+if (!VAPID_PUBLIC_KEY) {
+  VAPID_PUBLIC_KEY = db.getSetting('vapid_public_key') || '';
+  VAPID_PRIVATE_KEY = db.getSetting('vapid_private_key') || '';
+  if (!VAPID_PUBLIC_KEY) {
+    const ecdh = crypto.createECDH('prime256v1');
+    ecdh.generateKeys();
+    VAPID_PUBLIC_KEY = Buffer.from(ecdh.getPublicKey()).toString('base64url');
+    VAPID_PRIVATE_KEY = Buffer.from(ecdh.getPrivateKey()).toString('base64url');
+    db.setSetting('vapid_public_key', VAPID_PUBLIC_KEY);
+    db.setSetting('vapid_private_key', VAPID_PRIVATE_KEY);
+    console.log('Generated and persisted VAPID keys to database.');
+  }
+}
+streamManager.startAll().then(() => {
+  console.log('All camera streams started.');
+
+  // Start motion detector if enabled (after streams are fully up)
+  const enableMotion = db.getSetting('enable_motion_detector') === 'true' ||
+                       process.env.ENABLE_MOTION_DETECTOR === 'true';
+  if (enableMotion) {
+    console.log('[motion] Motion detector enabled — starting in 3s');
+    setTimeout(() => motionManager.startMotionDetector(), 3000);
+  } else {
+    console.log('[motion] Motion detector disabled (set enable_motion_detector=true in DB settings to enable)');
+  }
+}).catch((err) => {
+  console.error('Error starting camera streams:', err);
+});
 
 const app = express();
 
@@ -76,7 +117,7 @@ app.use(helmet({
       styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
       fontSrc: ["'self'", "https://fonts.gstatic.com"],
       imgSrc: ["'self'", "data:"],
-      connectSrc: ["'self'", "ws:", "wss:"],
+      connectSrc: ["'self'", "ws:", "wss:", "https://cdn.jsdelivr.net"],
       mediaSrc: ["'self'", "blob:"],
       workerSrc: ["'self'", "blob:"],
     },
@@ -143,13 +184,40 @@ app.use('/admin/login', (req, res, next) => _loginLimiterState.limiter(req, res,
 app.use('/admin/setup', (req, res, next) => _setupLimiterState.limiter(req, res, next));
 app.use('/api', (req, res, next) => _apiLimiterState.limiter(req, res, next));
 
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(__dirname, 'public'), {
+  setHeaders(res, filePath) {
+    if (/\.(js|css)$/.test(filePath)) {
+      // Revalidate on every request — ETag avoids re-download if unchanged.
+      res.setHeader('Cache-Control', 'no-cache');
+    } else if (/\.html$/.test(filePath)) {
+      // HTML must never be cached — always fresh.
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    }
+  },
+}));
 
-// HLS streams — optionally require auth
+// HLS streams — optionally require auth; start stream on demand if m3u8 missing
 app.use('/hls', (req, res, next) => {
   if (db.getSetting('require_auth_streams') === 'true') {
     if (!req.session || !req.session.userId) {
       return res.status(401).json({ error: 'Authentication required' });
+    }
+  }
+  const m = req.path.match(/\/cam-(\d+)\.m3u8$/);
+  if (m && req.method === 'GET') {
+    const cameraId = m[1];
+    const m3u8Path = path.join(streamManager.hlsDir, `cam-${cameraId}.m3u8`);
+    if (!fs.existsSync(m3u8Path)) {
+      if (!streamManager.isRunning(cameraId)) {
+        const cam = db.getCamera(cameraId);
+        if (cam) {
+          streamManager.startStream(cameraId, cam).catch((err) =>
+            console.error(`[hls] Failed to start stream for camera ${cameraId}:`, err.message)
+          );
+        }
+      }
+      res.setHeader('Retry-After', '3');
+      return res.status(503).send('Stream not ready; retry in a few seconds.');
     }
   }
   next();
@@ -265,8 +333,86 @@ app.get('/api/admin/me', (req, res) => {
   res.json({ isAdmin: !!(req.session && req.session.userId) });
 });
 
+function getUiLocaleConfig() {
+  const setting = db.getSetting('datetime_locale') || 'eu';
+  const locale = setting === 'us' ? 'en-US' : 'sv-SE';
+  const hour12 = setting === 'us';
+  return { setting, locale, hour12 };
+}
+
 app.get('/api/config', (req, res) => {
-  res.json({ siteName: db.getSetting('site_name') || 'Birdcam Live' });
+  const siteName = db.getSetting('site_name') || 'Birdcam Live';
+  const { setting: datetimeLocale, locale, hour12 } = getUiLocaleConfig();
+  res.json({ siteName, datetimeLocale, locale, hour12 });
+});
+
+// Expose VAPID public key so the browser can subscribe to Web Push
+app.get('/api/motion/vapid-public-key', (req, res) => {
+  res.json({ publicKey: VAPID_PUBLIC_KEY });
+});
+
+// Public: motion visit stats + list (all server-side for chart, event log, and stat boxes)
+app.get('/api/motion-visits/stats', (req, res) => {
+  const { byHour, byDay } = db.getMotionVisitStats();
+  const visits = db.listRecentVisits(50);
+  const last_visit = db.getLastVisitTime();
+  res.json({ byHour, byDay, last_visit, visits });
+});
+
+// Public: list recent motion clips (no auth required — visible to all visitors)
+// Only include finalized clips (ended + file exists) so they are playable and show correct size.
+app.get('/api/motion-clips', (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit, 10) || 30, 100);
+  const clips = db.listRecentMotionIncidents(limit);
+  const out = [];
+  for (const c of clips) {
+    if (c.ended_at == null) continue; // not finalized yet
+    const filename = path.basename(c.file_path || '');
+    if (!filename.endsWith('.mp4')) continue;
+    const filePath = path.join(motionClipsDir, filename);
+    if (!fs.existsSync(filePath)) continue; // file missing, skip so we don't show unplayable clip
+    let sizeBytes = c.size_bytes;
+    if (!sizeBytes || sizeBytes <= 0) {
+      try {
+        const st = fs.statSync(filePath);
+        sizeBytes = st.size || 0;
+      } catch (_) {
+        sizeBytes = 0;
+      }
+    }
+    out.push({
+      id:           c.id,
+      started_at:   c.started_at,
+      ended_at:     c.ended_at,
+      size_bytes:   sizeBytes,
+      camera_name:  c.camera_name,
+      starred:      !!c.starred,
+      filename,
+    });
+    if (out.length >= limit) break;
+  }
+  res.json(out);
+});
+
+// Public: toggle star on a motion clip (used by main page preview strip)
+app.post('/api/motion-clips/:id/star', (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
+  const incident = db.getMotionIncident(id);
+  if (!incident) return res.status(404).json({ error: 'Not found' });
+  const updated = db.setMotionIncidentStar(id, !incident.starred);
+  res.json({ id: updated.id, starred: !!updated.starred });
+});
+
+// Public: serve motion clip MP4 files by filename (path-traversal safe)
+app.get('/clips/:filename', (req, res) => {
+  const filename = path.basename(req.params.filename); // strips any ../
+  if (!filename.endsWith('.mp4') || !/^[\w\-]+\.mp4$/.test(filename)) {
+    return res.status(400).send('Invalid filename');
+  }
+  const filePath = path.join(motionClipsDir, filename);
+  if (!fs.existsSync(filePath)) return res.status(404).send('Not found');
+  res.sendFile(filePath);
 });
 
 const server = http.createServer(app);
@@ -337,30 +483,448 @@ function reloadChatMessages() {
   chatMessages.push(...db.getChatMessages(100));
 }
 
-const wss = new WebSocketServer({ server, path: '/ws' });
+// Use noServer so both WebSocket servers coexist on the same HTTP server.
+// With { server, path }, the first server aborts upgrades for non-matching
+// paths before the second server can handle them.
+const wss = new WebSocketServer({ noServer: true });
+const motionWss = new WebSocketServer({ noServer: true });
+
+server.on('upgrade', (request, socket, head) => {
+  const pathname = new URL(request.url, 'http://localhost').pathname;
+  const ip = request.headers['x-forwarded-for']?.split(',')[0]?.trim() || request.socket.remoteAddress;
+  console.log(`[ws-upgrade] ${request.method} ${pathname} from ${ip}`);
+  if (pathname === '/ws') {
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      wss.emit('connection', ws, request);
+    });
+  } else if (pathname === '/motion-ws') {
+    motionWss.handleUpgrade(request, socket, head, (ws) => {
+      motionWss.emit('connection', ws, request);
+    });
+  } else {
+    console.log(`[ws-upgrade] Rejected unknown path: ${pathname}`);
+    socket.destroy();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// /motion-ws — shared channel for the motion detector and browser clients
+// motion.py connects with ?role=detector; browsers connect without it.
+// All traffic flows through port 3000 — no extra ports needed.
+// ---------------------------------------------------------------------------
+let _motionDetector = null; // the single motion.py detector connection
+const motionBrowserClients = new Set();
+
+// ---------------------------------------------------------------------------
+// Motion incident recordings (MP4 per "movement incident")
+// ---------------------------------------------------------------------------
+
+// cameraId -> { incidentId, filePath, ffmpegProc, endTimer }
+const activeMotionIncidents = new Map();
+let motionRuntimeConfig = {
+  cooldown_sec: parseInt(process.env.MOTION_COOLDOWN_SEC, 10) || 30,
+};
+
+function formatIsoNow() {
+  return new Date().toISOString();
+}
+
+function parseIsoToMs(iso) {
+  const t = Date.parse(iso);
+  return Number.isFinite(t) ? t : Date.now();
+}
+
+function safeNumber(n, fallback) {
+  const x = Number(n);
+  return Number.isFinite(x) ? x : fallback;
+}
+
+function pushOpt(args, key, value) {
+  if (value === undefined || value === null) return;
+  const s = String(value);
+  if (s === '') return;
+  args.push(key);
+  args.push(s);
+}
+
+function buildMotionRecordArgs(rtspUrl, outFile, camera) {
+  const opts = streamManager.parseFfmpegOptions(camera);
+  const args = [];
+
+  pushOpt(args, '-rtsp_transport', opts.rtsp_transport || 'tcp');
+  args.push('-i', rtspUrl);
+  pushOpt(args, '-fflags', opts.fflags || 'flush_packets');
+  pushOpt(args, '-max_delay', opts.max_delay || 2);
+  pushOpt(args, '-flags', opts.flags || '-global_header');
+
+  // Video
+  if (opts.video_codec === 'copy') {
+    args.push('-c:v', 'copy');
+  } else {
+    args.push('-c:v', opts.video_codec || 'libx264');
+    args.push('-preset', opts.preset || 'ultrafast');
+    args.push('-tune', opts.tune || 'zerolatency');
+    args.push('-crf', opts.crf || 28);
+    if (opts.pix_fmt) args.push('-pix_fmt', opts.pix_fmt);
+    if (opts.g) args.push('-g', opts.g);
+    if (opts.keyint_min) args.push('-keyint_min', opts.keyint_min);
+    if (opts.force_key_frames) args.push('-force_key_frames', opts.force_key_frames);
+  }
+
+  // Audio (keep optional; default audio codec is aac)
+  if (opts.audio_codec && opts.audio_codec !== 'none') {
+    args.push('-c:a', opts.audio_codec);
+    args.push('-ac', safeNumber(opts.audio_channels, 1));
+    args.push('-ar', safeNumber(opts.audio_sample_rate, 44100));
+  } else if (opts.audio_codec === 'none') {
+    args.push('-an');
+  } else {
+    args.push('-c:a', 'aac');
+    args.push('-ac', safeNumber(opts.audio_channels, 1));
+    args.push('-ar', safeNumber(opts.audio_sample_rate, 44100));
+  }
+
+  // Output
+  args.push('-movflags', '+faststart');
+  args.push('-f', 'mp4');
+  args.push(outFile);
+
+  return args;
+}
+
+function startMotionIncident(cameraId, startedAtIso) {
+  const cam = db.getCamera(cameraId);
+  if (!cam || !cam.rtsp_url) return null;
+
+  const fileName = `motion-${cameraId}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.mp4`;
+  const filePath = path.join(motionClipsDir, fileName);
+
+  const incidentId = db.addMotionIncident(cameraId, startedAtIso, filePath);
+  const rtspUrl = cam.rtsp_url;
+  const args = buildMotionRecordArgs(rtspUrl, filePath, cam);
+
+  const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
+  const stderrChunks = [];
+  proc.stderr.on('data', (chunk) => {
+    stderrChunks.push(chunk);
+    if (stderrChunks.length > 200) stderrChunks.shift(); // keep last ~200 lines
+  });
+
+  return { incidentId, filePath, ffmpegProc: proc, endTimer: null, startedAtIso, stderrChunks };
+}
+
+function stopMotionIncident(cameraId, endedAtIso) {
+  const state = activeMotionIncidents.get(cameraId);
+  if (!state) return;
+  activeMotionIncidents.delete(cameraId);
+
+  if (state.endTimer) clearTimeout(state.endTimer);
+
+  const proc = state.ffmpegProc;
+  if (proc && !proc.killed) {
+    // SIGINT usually allows ffmpeg to finalize the MP4 container.
+    try { proc.kill('SIGINT'); } catch (_) {}
+    setTimeout(() => {
+      try {
+        if (proc && !proc.killed) proc.kill('SIGKILL');
+      } catch (_) {}
+    }, 5000);
+  }
+
+  // Finalize DB row and retention after process exits (or after a short grace period).
+  let finalized = false;
+  const finalize = () => {
+    if (finalized) return;
+    finalized = true;
+    let sizeBytes = 0;
+    try {
+      const st = fs.statSync(state.filePath);
+      sizeBytes = st.size || 0;
+    } catch (_) {
+      sizeBytes = 0;
+    }
+
+    db.endMotionIncident(state.incidentId, endedAtIso, sizeBytes);
+
+    if (!sizeBytes) {
+      const stderr = (state.stderrChunks || [])
+        .map((c) => c.toString())
+        .join('')
+        .trim()
+        .split('\n')
+        .slice(-25)
+        .join('\n');
+      console.warn(`[motion-ws] Recording produced 0 bytes, removing incident ${state.incidentId}. FFmpeg stderr (last lines):\n${stderr || '(none)'}`);
+      try { fs.unlinkSync(state.filePath); } catch (_) {}
+      db.deleteMotionIncident(state.incidentId);
+    } else {
+      enforceMotionClipRetention();
+      // Notify browser clients so they can show a "Visit" even if they missed live motion frames.
+      const payload = JSON.stringify({
+        type: 'visit_recorded',
+        started_at: state.startedAtIso || endedAtIso,
+        ended_at: endedAtIso,
+        camera_id: cameraId,
+      });
+      if (motionBrowserClients.size > 0) {
+        motionBrowserClients.forEach(c => { if (c.readyState === 1) c.send(payload); });
+      }
+    }
+  };
+
+  if (proc) {
+    const done = () => finalize();
+    proc.once('exit', done);
+    setTimeout(done, 8000); // in case ffmpeg doesn't exit quickly
+  } else {
+    finalize();
+  }
+}
+
+function enforceMotionClipRetention() {
+  const maxCount = parseInt(db.getSetting('motion_clip_max_count'), 10) || 0;
+  const maxMb = parseInt(db.getSetting('motion_clip_max_total_mb'), 10) || 0;
+  if (maxCount <= 0 && maxMb <= 0) return;
+
+  let totals = db.getUnstarredMotionIncidentTotals();
+  let count = totals.count || 0;
+  let bytes = totals.bytes || 0;
+
+  const maxBytes = maxMb > 0 ? maxMb * 1024 * 1024 : 0;
+
+  let safety = 500; // avoid infinite loops if something goes wrong
+  while (safety-- > 0) {
+    const tooManyByCount = maxCount > 0 && count > maxCount;
+    const tooManyBySize = maxBytes > 0 && bytes > maxBytes;
+    if (!tooManyByCount && !tooManyBySize) break;
+
+    const oldest = db.getOldestUnstarredMotionIncidents(1)[0];
+    if (!oldest) break;
+
+    try { fs.unlinkSync(oldest.file_path); } catch (_) {}
+    db.deleteMotionIncident(oldest.id);
+
+    count -= 1;
+    bytes -= oldest.size_bytes || 0;
+  }
+}
+
+motionWss.on('connection', (ws, req) => {
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
+
+  const url = new URL(req.url, 'http://localhost');
+  const role = url.searchParams.get('role');
+  const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress;
+  const origin = req.headers.origin;
+  const host = req.headers.host || '';
+
+  const isLocalIp =
+    ip === '127.0.0.1' ||
+    ip === '::1' ||
+    ip === '::ffff:127.0.0.1';
+
+  const motionDetectorToken = url.searchParams.get('token') || req.headers['x-motion-token'];
+
+  if (role === 'detector') {
+    // --- Motion detector (Python) connecting ---
+    const expectedDetectorToken = process.env.MOTION_DETECTOR_TOKEN || '';
+    if (expectedDetectorToken) {
+      if (!motionDetectorToken || motionDetectorToken !== expectedDetectorToken) {
+        console.warn(`[motion-ws] Rejecting detector connection from ip=${ip}: invalid or missing token`);
+        try { ws.close(1008, 'unauthorized'); } catch (_) {}
+        return;
+      }
+    } else if (!isLocalIp) {
+      console.warn(`[motion-ws] Rejecting detector connection from non-local ip=${ip} (no MOTION_DETECTOR_TOKEN configured)`);
+      try { ws.close(1008, 'unauthorized'); } catch (_) {}
+      return;
+    }
+
+    if (_motionDetector && _motionDetector.readyState === 1) {
+      console.log(`[motion-ws] Replacing existing detector connection with new one from ip=${ip}`);
+      _motionDetector.close(1000, 'replaced');
+    }
+    _motionDetector = ws;
+    console.log(`[motion-ws] Detector connected ip=${ip} (${motionBrowserClients.size} browser(s) watching)`);
+
+    const msg = JSON.stringify({ type: 'backend_connected' });
+    motionBrowserClients.forEach(c => { if (c.readyState === 1) c.send(msg); });
+
+    ws.on('message', (data) => {
+      const str = data.toString();
+      let msg = null;
+      try { msg = JSON.parse(str); } catch (_) {}
+
+      // Persist motion incidents + record MP4 clips
+      if (msg && msg.type) {
+        if (msg.type === 'config') {
+          if (msg.cooldown_sec !== undefined) {
+            motionRuntimeConfig.cooldown_sec = safeNumber(msg.cooldown_sec, motionRuntimeConfig.cooldown_sec);
+          }
+        } else if (msg.type === 'motion') {
+          const cameraId = Number(msg.camera_id);
+          const detected = msg.detected === true;
+          const boxesOk = Array.isArray(msg.boxes) && msg.boxes.length > 0;
+          if (!Number.isFinite(cameraId) || cameraId < 1) {
+            console.warn('[motion-ws] Ignoring motion: invalid or missing camera_id', msg.camera_id);
+          } else if (detected && boxesOk) {
+            const startedAtIso = msg.timestamp || formatIsoNow();
+            const state = activeMotionIncidents.get(cameraId);
+            const cooldownMs = safeNumber(motionRuntimeConfig.cooldown_sec, 30) * 1000;
+
+            if (!state) {
+              const s = startMotionIncident(cameraId, startedAtIso);
+              if (s) {
+                console.log(`[motion-ws] Started recording camera ${cameraId}`);
+                s.endTimer = setTimeout(() => stopMotionIncident(cameraId, formatIsoNow()), cooldownMs);
+                activeMotionIncidents.set(cameraId, s);
+                db.updateMotionIncidentLastMotion(s.incidentId, startedAtIso);
+              } else {
+                console.warn(`[motion-ws] Could not start recording: camera ${cameraId} not found or no RTSP URL`);
+              }
+            } else {
+              db.updateMotionIncidentLastMotion(state.incidentId, startedAtIso);
+              if (state.endTimer) clearTimeout(state.endTimer);
+              state.endTimer = setTimeout(() => stopMotionIncident(cameraId, formatIsoNow()), cooldownMs);
+            }
+          }
+        }
+      }
+
+      if (motionBrowserClients.size > 0) {
+        motionBrowserClients.forEach(c => { if (c.readyState === 1) c.send(str); });
+      }
+    });
+
+    ws.on('close', (code, reason) => {
+      if (_motionDetector === ws) _motionDetector = null;
+      console.log(`[motion-ws] Detector disconnected ip=${ip} code=${code} reason=${reason || 'none'}`);
+      const dcMsg = JSON.stringify({ type: 'backend_disconnected' });
+      motionBrowserClients.forEach(c => { if (c.readyState === 1) c.send(dcMsg); });
+
+      // Stop any active incident recorders (best-effort)
+      for (const cameraId of activeMotionIncidents.keys()) {
+        try { stopMotionIncident(cameraId, formatIsoNow()); } catch (_) {}
+      }
+    });
+
+    ws.on('error', (err) => {
+      console.error(`[motion-ws] Detector error ip=${ip}: ${err.message}`);
+    });
+    return;
+  }
+
+  // --- Browser client ---
+  if (process.env.MOTION_WS_ALLOWED_ORIGIN) {
+    // If configured, only accept exact Origin header match.
+    if (origin !== process.env.MOTION_WS_ALLOWED_ORIGIN) {
+      console.warn(`[motion-ws] Rejecting browser connection from ip=${ip} with origin=${origin}`);
+      try { ws.close(1008, 'origin not allowed'); } catch (_) {}
+      return;
+    }
+  } else if (origin) {
+    // Default: enforce host match for browser-originated connections.
+    try {
+      const o = new URL(origin);
+      if (o.host !== host) {
+        console.warn(`[motion-ws] Rejecting browser connection origin host mismatch ip=${ip} origin=${origin} host=${host}`);
+        try { ws.close(1008, 'origin not allowed'); } catch (_) {}
+        return;
+      }
+    } catch (_) {
+      console.warn(`[motion-ws] Rejecting browser connection with invalid origin ip=${ip}`);
+      try { ws.close(1008, 'Invalid origin'); } catch (_) {}
+      return;
+    }
+  }
+
+  motionBrowserClients.add(ws);
+  console.log(`[motion-ws] Browser connected ip=${ip} (total: ${motionBrowserClients.size})`);
+
+  const backendOnline = _motionDetector && _motionDetector.readyState === 1;
+  ws.send(JSON.stringify({ type: backendOnline ? 'backend_connected' : 'backend_disconnected' }));
+
+  ws.on('message', (data) => {
+    const str = data.toString();
+    console.log(`[motion-ws] Browser → detector: ${str.slice(0, 200)}`);
+    if (_motionDetector && _motionDetector.readyState === 1) {
+      _motionDetector.send(str);
+    }
+  });
+
+  ws.on('close', (code, reason) => {
+    motionBrowserClients.delete(ws);
+    console.log(`[motion-ws] Browser disconnected ip=${ip} code=${code} reason=${reason || 'none'} (total: ${motionBrowserClients.size})`);
+  });
+
+  ws.on('error', (err) => {
+    console.error(`[motion-ws] Browser error ip=${ip}: ${err.message}`);
+  });
+});
+
+// Keepalive ping for both WebSocket servers — prevents proxy idle timeouts
+const WS_PING_INTERVAL = 30_000;
+const wsPingInterval = setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if (ws.isAlive === false) {
+      console.log(`[chat-ws] Terminating unresponsive client ip=${ws._clientIp || '?'}`);
+      return ws.terminate();
+    }
+    ws.isAlive = false;
+    ws.ping();
+  });
+  motionBrowserClients.forEach((ws) => {
+    if (ws.isAlive === false) {
+      console.log(`[motion-ws] Terminating unresponsive browser client`);
+      return ws.terminate();
+    }
+    ws.isAlive = false;
+    ws.ping();
+  });
+  if (_motionDetector) {
+    if (_motionDetector.isAlive === false) {
+      console.log('[motion-ws] Terminating unresponsive detector');
+      _motionDetector.terminate();
+    } else {
+      _motionDetector.isAlive = false;
+      _motionDetector.ping();
+    }
+  }
+}, WS_PING_INTERVAL);
+
 wss.on('connection', (ws, req) => {
+  const clientIp = getClientIp(req);
   const origin = req.headers.origin;
   if (origin) {
     try {
       const o = new URL(origin);
       const host = req.headers.host || '';
       if (o.host !== host) {
+        console.log(`[chat-ws] Rejected origin=${origin} host=${host} ip=${clientIp}`);
         ws.close(1008, 'Origin not allowed');
         return;
       }
     } catch (_) {
+      console.log(`[chat-ws] Rejected invalid origin ip=${clientIp}`);
       ws.close(1008, 'Invalid origin');
       return;
     }
   }
   
-  const clientIp = getClientIp(req);
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
+
   ws._msgTimestamps = [];
   ws._clientIp = clientIp;
+  console.log(`[chat-ws] Connected ip=${clientIp} (total: ${wss.clients.size})`);
 
   ws.send(JSON.stringify({ type: 'history', messages: chatMessages.slice(-50) }));
   broadcastStats();
-  ws.on('close', () => broadcastStats());
+  ws.on('close', (code, reason) => {
+    console.log(`[chat-ws] Disconnected ip=${clientIp} code=${code} reason=${reason || 'none'} (total: ${wss.clients.size})`);
+    broadcastStats();
+  });
   ws.on('message', (raw) => {
     try {
       // Rate limiting per connection
@@ -522,10 +1086,20 @@ app.use((err, req, res, next) => {
 });
 
 // --- Graceful shutdown ---
-function shutdown(signal) {
+async function shutdown(signal) {
   console.log(`\n${signal} received. Shutting down gracefully...`);
-  streamManager.stopAll();
+  clearInterval(wsPingInterval);
+  motionManager.stopMotionDetector();
+  await streamManager.stopAll();
+
+  // Stop any in-progress motion incident recordings (best-effort).
+  for (const cameraId of activeMotionIncidents.keys()) {
+    try { stopMotionIncident(cameraId, formatIsoNow()); } catch (_) {}
+  }
+
   wss.clients.forEach((client) => client.close());
+  motionBrowserClients.forEach((client) => client.close());
+  if (_motionDetector) _motionDetector.close(1000, 'shutdown');
   server.close(() => {
     console.log('Server closed.');
     process.exit(0);

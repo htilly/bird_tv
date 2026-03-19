@@ -3,7 +3,9 @@
   const LAST_VISIT_KEY = 'birdcam_last_visit';
   const STATS_POLL_INTERVAL = 8000;
 
-  // Apply configurable site name
+  let UI_LOCALE = { locale: undefined, hour12: undefined };
+
+  // Apply configurable site name + date/time locale
   fetch('/api/config').then(r => r.json()).then(cfg => {
     const name = cfg.siteName || 'Birdcam Live';
     document.title = name;
@@ -16,6 +18,10 @@
           break;
         }
       }
+    }
+    if (cfg && cfg.locale) {
+      UI_LOCALE.locale = cfg.locale;
+      UI_LOCALE.hour12 = typeof cfg.hour12 === 'boolean' ? cfg.hour12 : undefined;
     }
   }).catch(() => {});
 
@@ -93,16 +99,38 @@
     const src = `/hls/cam-${id}.m3u8`;
     if (Hls.isSupported()) {
       destroyHls();
-      hls = new Hls({ enableWorker: true });
-      hls.loadSource(src);
+      hls = new Hls({
+        enableWorker: true,
+        lowLatencyMode: true,
+        liveSyncDurationCount: 1,
+        liveMaxLatencyDurationCount: 3,
+        maxBufferLength: 4,
+        maxMaxBufferLength: 8,
+      });
       hls.attachMedia(video);
-      hls.on(Hls.Events.MANIFEST_PARSED, () => videoOverlay.classList.add('hidden'));
+      let manifestRetries = 0;
+      const maxManifestRetries = 5;
+      function tryLoadSource() {
+        hls.loadSource(src);
+      }
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        manifestRetries = 0;
+        videoOverlay.classList.add('hidden');
+      });
       hls.on(Hls.Events.ERROR, (_, data) => {
         if (data.fatal) {
+          const code = data.response?.code;
+          const isManifestNotReady = (code === 404 || code === 503) && data.type === Hls.ErrorTypes.NETWORK_ERROR;
+          if (isManifestNotReady && manifestRetries < maxManifestRetries) {
+            manifestRetries += 1;
+            setTimeout(tryLoadSource, 3000);
+            return;
+          }
           videoOverlay.classList.remove('hidden');
           videoOverlay.querySelector('p').textContent = 'Stream not available. Try another camera.';
         }
       });
+      tryLoadSource();
     } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
       video.src = src;
       videoOverlay.classList.add('hidden');
@@ -191,7 +219,12 @@
     const isMine = m.nickname === myNickname();
     const color = nickColor(m.nickname);
     const initial = m.nickname.charAt(0).toUpperCase();
-    const time = m.time ? new Date(m.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+    const time = m.time
+      ? new Date(m.time).toLocaleTimeString(
+          UI_LOCALE.locale ? [UI_LOCALE.locale] : [],
+          { hour: '2-digit', minute: '2-digit', hour12: UI_LOCALE.hour12 }
+        )
+      : '';
 
     const row = document.createElement('div');
     row.className = 'chat-msg-row' + (isMine ? ' chat-msg-row--mine' : '');
@@ -356,6 +389,9 @@
   let allStarredSnaps = [];
   const adminMePromise = fetch('/api/admin/me').then(r => r.json()).then(d => { isAdmin = !!d.isAdmin; }).catch(() => {});
 
+  // Recent recordings preview strip (last N clips, with stars)
+  const recStrip = document.getElementById('rec-strip');
+
   function makeSnapThumb(s, onClick) {
     const thumb = document.createElement('div');
     thumb.className = 'snap-thumb' + (s.starred ? ' snap-thumb--starred' : '');
@@ -370,7 +406,10 @@
     }
     const cap = document.createElement('div');
     cap.className = 'snap-thumb-caption';
-    const t = new Date(s.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const t = new Date(s.created_at).toLocaleTimeString(
+      UI_LOCALE.locale ? [UI_LOCALE.locale] : [],
+      { hour: '2-digit', minute: '2-digit', hour12: UI_LOCALE.hour12 }
+    );
     cap.textContent = s.nickname + ' \u00B7 ' + t;
     thumb.appendChild(img);
     thumb.appendChild(cap);
@@ -401,7 +440,10 @@
   function openLightbox(s) {
     lightboxSnap = s;
     snapLightboxImg.src = s.url;
-    const t = new Date(s.created_at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+    const t = new Date(s.created_at).toLocaleString(
+      UI_LOCALE.locale ? [UI_LOCALE.locale] : [],
+      { dateStyle: 'medium', timeStyle: 'short', hour12: UI_LOCALE.hour12 }
+    );
     snapLightboxCaption.textContent = '\uD83D\uDCF7 ' + s.nickname + (s.camera_name ? ' \u00B7 ' + s.camera_name : '') + ' \u00B7 ' + t;
     if (isAdmin && s.id) {
       snapLightboxStar.textContent = s.starred ? '\u2605 Unstar' : '\u2B50 Star';
@@ -478,7 +520,10 @@
     ctx.font = `bold ${fontSize}px sans-serif`;
     ctx.fillStyle = '#ffffff';
     ctx.textBaseline = 'middle';
-    const timeStr = new Date().toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
+    const timeStr = new Date().toLocaleString(
+      UI_LOCALE.locale ? [UI_LOCALE.locale] : [],
+      { dateStyle: 'short', timeStyle: 'short', hour12: UI_LOCALE.hour12 }
+    );
     ctx.fillText('📷 ' + nick + (camName ? ' · ' + camName : '') + '  ' + timeStr, 10, canvas.height - barH / 2);
 
     // Flash effect
@@ -531,7 +576,10 @@
     const yesterday = new Date(now);
     yesterday.setDate(yesterday.getDate() - 1);
     const wasYesterday = then.toDateString() === yesterday.toDateString();
-    const timeStr = then.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const timeStr = then.toLocaleTimeString(
+      UI_LOCALE.locale ? [UI_LOCALE.locale] : [],
+      { hour: '2-digit', minute: '2-digit', hour12: UI_LOCALE.hour12 }
+    );
     if (sameDay) return 'Your last visit: Today at ' + timeStr;
     if (wasYesterday) return 'Your last visit: Yesterday at ' + timeStr;
     return 'Your last visit: ' + then.toLocaleDateString() + ' at ' + timeStr;
@@ -598,6 +646,7 @@
 
   updateLastVisit();
   fetchStats();
+  loadRecentClips();
   setInterval(fetchStats, STATS_POLL_INTERVAL);
 
   // --- Recordings panel ---
@@ -678,7 +727,14 @@
         destroyHls();
         videoOverlay.classList.add('hidden');
         if (Hls.isSupported()) {
-          hls = new Hls({ enableWorker: true });
+          hls = new Hls({
+            enableWorker: true,
+            lowLatencyMode: true,
+            liveSyncDurationCount: 1,
+            liveMaxLatencyDurationCount: 3,
+            maxBufferLength: 4,
+            maxMaxBufferLength: 8,
+          });
           hls.loadSource(data.hlsUrl);
           hls.attachMedia(video);
           hls.on(Hls.Events.MANIFEST_PARSED, () => { videoOverlay.classList.add('hidden'); });
@@ -692,5 +748,75 @@
         btn.disabled = false;
       })
       .catch(() => { btn.textContent = '✗ Error'; btn.disabled = false; });
+  }
+
+  // --- Recent recordings strip logic ---
+  function renderRecentClips(clips) {
+    if (!recStrip) return;
+    recStrip.innerHTML = '';
+    if (!clips || !clips.length) return;
+    clips.slice(0, 10).forEach((c) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'rec-chip';
+      const start = c.started_at ? new Date(c.started_at) : null;
+      const end = c.ended_at ? new Date(c.ended_at) : null;
+      const durSec = start && end ? Math.round((end - start) / 1000) : null;
+      const timeStr = start ? c.started_at.slice(11, 16) : '—';
+      const durStr = durSec != null ? `${durSec}s` : '';
+
+      const timeEl = document.createElement('span');
+      timeEl.className = 'rec-chip-time';
+      timeEl.textContent = timeStr;
+
+      const metaEl = document.createElement('span');
+      metaEl.className = 'rec-chip-meta';
+      metaEl.textContent = durStr;
+
+      const starEl = document.createElement('span');
+      starEl.className = 'rec-chip-star' + (c.starred ? ' rec-chip-star-on' : '');
+      starEl.textContent = '★';
+      starEl.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleClipStar(c.id, starEl);
+      });
+
+      btn.appendChild(timeEl);
+      if (durStr) btn.appendChild(metaEl);
+      btn.appendChild(starEl);
+
+      btn.addEventListener('click', () => {
+        if (!c.filename) return;
+        window.open(`/clips/${encodeURIComponent(c.filename)}`, '_blank');
+      });
+
+      recStrip.appendChild(btn);
+    });
+  }
+
+  function loadRecentClips() {
+    if (!recStrip) return;
+    fetch('/api/motion-clips?limit=10')
+      .then((r) => r.json())
+      .then((clips) => renderRecentClips(clips))
+      .catch(() => {});
+  }
+
+  function toggleClipStar(id, starEl) {
+    fetch(`/api/motion-clips/${id}/star`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    })
+      .then((r) => r.json())
+      .then((data) => {
+        if (!data || typeof data.starred === 'undefined') return;
+        if (data.starred) {
+          starEl.classList.add('rec-chip-star-on');
+        } else {
+          starEl.classList.remove('rec-chip-star-on');
+        }
+      })
+      .catch(() => {});
   }
 })();
