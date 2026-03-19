@@ -47,7 +47,7 @@ function xmeyeHash(password) {
 }
 
 function makePacket(sessionId, seq, msgId, payload) {
-  const data = typeof payload === 'object'
+  const data = typeof payload === 'object' && !Buffer.isBuffer(payload)
     ? Buffer.from(JSON.stringify(payload) + '\n\x00', 'utf8')
     : payload;
   const header = Buffer.alloc(HEADER_LEN);

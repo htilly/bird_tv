@@ -61,6 +61,7 @@
       .then((list) => {
         cameras = list;
         renderTabs();
+        if (recCamera) populateRecCameras();
         if (cameras.length && !selectedCameraId) selectCamera(cameras[0].id);
         if (!cameras.length) {
           selectedCameraId = null;
