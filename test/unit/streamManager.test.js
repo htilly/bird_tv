@@ -121,11 +121,9 @@ describe('streamManager.buildFfmpegArgs', () => {
     assert.ok(args[idx + 1].includes('%03d.ts'));
   });
 
-  it('includes reconnect options', () => {
+  it('includes stimeout for RTSP connection', () => {
     const args = buildFfmpegArgs(rtspUrl, outBase, {});
-    assert.ok(args.includes('-reconnect'));
-    assert.ok(args.includes('-reconnect_streamed'));
-    assert.ok(args.includes('-reconnect_delay_max'));
+    assert.ok(args.includes('-stimeout'));
   });
 
   it('includes rtsp_transport option', () => {
