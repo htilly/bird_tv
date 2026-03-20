@@ -57,155 +57,161 @@ function ffmpegOptionsFromBody(body) {
 function ffmpegFormSection(opts) {
   const v = (key) => escapeHtml(String(opts[key] ?? ''));
   return `
-      <div class="form-section">
-        <p class="form-section-title">FFmpeg / Stream options</p>
-        <p class="field-hint" style="margin-bottom:0.75rem;">Override defaults for this camera. Leave defaults for typical IP cameras.</p>
-        <div class="form-row">
-          <div>
+      <div class="ffmpeg-section">
+        <h3 class="ffmpeg-subsection-title">Connection</h3>
+        <div class="form-grid-3">
+          <div class="form-field">
             <label for="ffmpeg-rtsp-transport">RTSP transport</label>
             <select id="ffmpeg-rtsp-transport" name="ffmpeg_rtsp_transport">
-              <option value="tcp" ${opts.rtsp_transport === 'tcp' ? 'selected' : ''}>tcp</option>
-              <option value="udp" ${opts.rtsp_transport === 'udp' ? 'selected' : ''}>udp</option>
-              <option value="http" ${opts.rtsp_transport === 'http' ? 'selected' : ''}>http</option>
+              <option value="tcp" ${opts.rtsp_transport === 'tcp' ? 'selected' : ''}>TCP</option>
+              <option value="udp" ${opts.rtsp_transport === 'udp' ? 'selected' : ''}>UDP</option>
+              <option value="http" ${opts.rtsp_transport === 'http' ? 'selected' : ''}>HTTP</option>
             </select>
           </div>
-          <div>
+          <div class="form-field">
             <label for="ffmpeg-reconnect">Reconnect</label>
             <input type="number" id="ffmpeg-reconnect" name="ffmpeg_reconnect" value="${v('reconnect')}" min="0" placeholder="1">
           </div>
-          <div>
-            <label for="ffmpeg-reconnect-streamed">Reconnect streamed</label>
-            <input type="number" id="ffmpeg-reconnect-streamed" name="ffmpeg_reconnect_streamed" value="${v('reconnect_streamed')}" min="0" placeholder="1">
-          </div>
-          <div>
-            <label for="ffmpeg-reconnect-delay-max">Reconnect delay max (s)</label>
+          <div class="form-field">
+            <label for="ffmpeg-reconnect-delay-max">Reconnect delay (s)</label>
             <input type="number" id="ffmpeg-reconnect-delay-max" name="ffmpeg_reconnect_delay_max" value="${v('reconnect_delay_max')}" min="0" placeholder="5">
           </div>
         </div>
-        <div class="form-row">
-          <div>
-            <label for="ffmpeg-fflags">Input fflags</label>
+        <div class="form-grid-3">
+          <div class="form-field">
+            <label for="ffmpeg-fflags">Input flags</label>
             <input type="text" id="ffmpeg-fflags" name="ffmpeg_fflags" value="${v('fflags')}" placeholder="genpts+discardcorrupt">
           </div>
-          <div>
-            <label for="ffmpeg-input-fps">Input FPS (-r)</label>
-            <input type="number" id="ffmpeg-input-fps" name="ffmpeg_input_fps" value="${v('input_fps')}" min="0" placeholder="8" title="0 = use camera default">
+          <div class="form-field">
+            <label for="ffmpeg-input-fps">Input FPS</label>
+            <input type="number" id="ffmpeg-input-fps" name="ffmpeg_input_fps" value="${v('input_fps')}" min="0" placeholder="auto">
           </div>
-          <div>
+          <div class="form-field">
             <label for="ffmpeg-max-delay">Max delay (s)</label>
             <input type="number" id="ffmpeg-max-delay" name="ffmpeg_max_delay" value="${v('max_delay')}" placeholder="2">
           </div>
-          <div>
-            <label for="ffmpeg-flags">Flags</label>
-            <input type="text" id="ffmpeg-flags" name="ffmpeg_flags" value="${v('flags')}" placeholder="-global_header">
-          </div>
         </div>
-        <p class="form-section-title" style="margin-top:1rem;">Video</p>
-        <div class="form-row">
-          <div>
-            <label for="ffmpeg-video-codec">Video codec</label>
+        <h3 class="ffmpeg-subsection-title">Video Encoding</h3>
+        <div class="form-grid-3">
+          <div class="form-field">
+            <label for="ffmpeg-video-codec">Codec</label>
             <select id="ffmpeg-video-codec" name="ffmpeg_video_codec">
-              <option value="libx264" ${opts.video_codec === 'libx264' ? 'selected' : ''}>libx264 (re-encode)</option>
-              <option value="copy" ${opts.video_codec === 'copy' ? 'selected' : ''}>copy (passthrough)</option>
+              <option value="copy" ${opts.video_codec === 'copy' ? 'selected' : ''}>Copy (passthrough)</option>
+              <option value="libx264" ${opts.video_codec === 'libx264' ? 'selected' : ''}>H.264 (re-encode)</option>
             </select>
           </div>
-          <div>
+          <div class="form-field">
             <label for="ffmpeg-preset">Preset</label>
             <select id="ffmpeg-preset" name="ffmpeg_preset">
-              <option value="ultrafast" ${opts.preset === 'ultrafast' ? 'selected' : ''}>ultrafast</option>
-              <option value="superfast" ${opts.preset === 'superfast' ? 'selected' : ''}>superfast</option>
-              <option value="veryfast" ${opts.preset === 'veryfast' ? 'selected' : ''}>veryfast</option>
-              <option value="fast" ${opts.preset === 'fast' ? 'selected' : ''}>fast</option>
-              <option value="medium" ${opts.preset === 'medium' ? 'selected' : ''}>medium</option>
-              <option value="slow" ${opts.preset === 'slow' ? 'selected' : ''}>slow</option>
+              <option value="ultrafast" ${opts.preset === 'ultrafast' ? 'selected' : ''}>Ultrafast</option>
+              <option value="superfast" ${opts.preset === 'superfast' ? 'selected' : ''}>Superfast</option>
+              <option value="veryfast" ${opts.preset === 'veryfast' ? 'selected' : ''}>Veryfast</option>
+              <option value="fast" ${opts.preset === 'fast' ? 'selected' : ''}>Fast</option>
+              <option value="medium" ${opts.preset === 'medium' ? 'selected' : ''}>Medium</option>
+              <option value="slow" ${opts.preset === 'slow' ? 'selected' : ''}>Slow</option>
             </select>
           </div>
-          <div>
-            <label for="ffmpeg-tune">Tune</label>
-            <input type="text" id="ffmpeg-tune" name="ffmpeg_tune" value="${v('tune')}" placeholder="zerolatency">
-          </div>
-          <div>
-            <label for="ffmpeg-crf">CRF (0–51)</label>
+          <div class="form-field">
+            <label for="ffmpeg-crf">CRF Quality</label>
             <input type="number" id="ffmpeg-crf" name="ffmpeg_crf" value="${v('crf')}" min="0" max="51" placeholder="28">
           </div>
-          <div>
+        </div>
+        <div class="form-grid-3">
+          <div class="form-field">
+            <label for="ffmpeg-fps-mode">FPS mode</label>
+            <select id="ffmpeg-fps-mode" name="ffmpeg_fps_mode">
+              <option value="vfr" ${opts.fps_mode === 'vfr' ? 'selected' : ''}>Variable (VFR)</option>
+              <option value="cfr" ${opts.fps_mode === 'cfr' ? 'selected' : ''}>Constant (CFR)</option>
+              <option value="passthrough" ${opts.fps_mode === 'passthrough' ? 'selected' : ''}>Passthrough</option>
+            </select>
+          </div>
+          <div class="form-field">
+            <label for="ffmpeg-g">GOP size</label>
+            <input type="number" id="ffmpeg-g" name="ffmpeg_g" value="${v('g')}" min="1" placeholder="16">
+          </div>
+          <div class="form-field">
             <label for="ffmpeg-pix-fmt">Pixel format</label>
             <input type="text" id="ffmpeg-pix-fmt" name="ffmpeg_pix_fmt" value="${v('pix_fmt')}" placeholder="yuv420p">
           </div>
-          <div>
-            <label for="ffmpeg-fps-mode">Frame rate mode</label>
-            <select id="ffmpeg-fps-mode" name="ffmpeg_fps_mode">
-              <option value="vfr" ${opts.fps_mode === 'vfr' ? 'selected' : ''}>vfr (variable — recommended)</option>
-              <option value="cfr" ${opts.fps_mode === 'cfr' ? 'selected' : ''}>cfr (constant)</option>
-              <option value="passthrough" ${opts.fps_mode === 'passthrough' ? 'selected' : ''}>passthrough</option>
-            </select>
-          </div>
         </div>
-        <div class="form-row">
-          <div style="flex:1;">
-            <label for="ffmpeg-scale-vf">Scale filter (-vf)</label>
-            <input type="text" id="ffmpeg-scale-vf" name="ffmpeg_scale_vf" value="${v('scale_vf')}" placeholder="scale=in_range=full:out_range=tv" style="width:100%;">
-          </div>
-          <div>
-            <label for="ffmpeg-color-range">Color range</label>
-            <input type="text" id="ffmpeg-color-range" name="ffmpeg_color_range" value="${v('color_range')}" placeholder="tv">
-          </div>
-        </div>
-        <div class="form-row">
-          <div>
-            <label for="ffmpeg-g">GOP size (keyframe interval)</label>
-            <input type="number" id="ffmpeg-g" name="ffmpeg_g" value="${v('g')}" min="1" placeholder="16">
-          </div>
-          <div>
-            <label for="ffmpeg-keyint-min">Keyint min</label>
-            <input type="number" id="ffmpeg-keyint-min" name="ffmpeg_keyint_min" value="${v('keyint_min')}" min="1" placeholder="16">
-          </div>
-          <div style="flex:1;">
-            <label for="ffmpeg-force-key-frames">Force key frames</label>
-            <input type="text" id="ffmpeg-force-key-frames" name="ffmpeg_force_key_frames" value="${v('force_key_frames')}" placeholder="expr:gte(t,n_forced*2)">
-          </div>
-        </div>
-        <p class="form-section-title" style="margin-top:1rem;">Audio</p>
-        <div class="form-row">
-          <div>
+        <h3 class="ffmpeg-subsection-title">Audio</h3>
+        <div class="form-grid-3">
+          <div class="form-field">
             <label for="ffmpeg-audio-codec">Audio codec</label>
             <select id="ffmpeg-audio-codec" name="ffmpeg_audio_codec">
-              <option value="aac" ${opts.audio_codec === 'aac' ? 'selected' : ''}>aac</option>
-              <option value="copy" ${opts.audio_codec === 'copy' ? 'selected' : ''}>copy</option>
-              <option value="none" ${opts.audio_codec === 'none' ? 'selected' : ''}>none (no audio)</option>
+              <option value="copy" ${opts.audio_codec === 'copy' ? 'selected' : ''}>Copy</option>
+              <option value="aac" ${opts.audio_codec === 'aac' ? 'selected' : ''}>AAC</option>
+              <option value="none" ${opts.audio_codec === 'none' ? 'selected' : ''}>None</option>
             </select>
           </div>
-          <div>
+          <div class="form-field">
             <label for="ffmpeg-audio-channels">Channels</label>
             <input type="number" id="ffmpeg-audio-channels" name="ffmpeg_audio_channels" value="${v('audio_channels')}" min="0" placeholder="1">
           </div>
-          <div>
-            <label for="ffmpeg-audio-sample-rate">Sample rate (Hz)</label>
+          <div class="form-field">
+            <label for="ffmpeg-audio-sample-rate">Sample rate</label>
             <input type="number" id="ffmpeg-audio-sample-rate" name="ffmpeg_audio_sample_rate" value="${v('audio_sample_rate')}" placeholder="44100">
           </div>
         </div>
-        <p class="form-section-title" style="margin-top:1rem;">HLS output</p>
-        <div class="form-row">
-          <div>
-            <label for="ffmpeg-hls-time">HLS segment length (s)</label>
+        <h3 class="ffmpeg-subsection-title">HLS Output</h3>
+        <div class="form-grid-3">
+          <div class="form-field">
+            <label for="ffmpeg-hls-time">Segment length (s)</label>
             <input type="number" id="ffmpeg-hls-time" name="ffmpeg_hls_time" value="${v('hls_time')}" min="1" placeholder="2">
           </div>
-          <div>
-            <label for="ffmpeg-hls-list-size">HLS list size (segments)</label>
-            <input type="number" id="ffmpeg-hls-list-size" name="ffmpeg_hls_list_size" value="${v('hls_list_size')}" min="0" placeholder="3">
+          <div class="form-field">
+            <label for="ffmpeg-hls-list-size">List size</label>
+            <input type="number" id="ffmpeg-hls-list-size" name="ffmpeg_hls_list_size" value="${v('hls_list_size')}" min="0" placeholder="6">
           </div>
-          <div style="flex:1;">
+          <div class="form-field">
             <label for="ffmpeg-hls-flags">HLS flags</label>
             <input type="text" id="ffmpeg-hls-flags" name="ffmpeg_hls_flags" value="${v('hls_flags')}" placeholder="delete_segments">
           </div>
         </div>
-        <div style="margin-top:0.75rem;">
-          <label for="ffmpeg-extra-input-args">Extra input arguments (space-separated, e.g. -analyzeduration 1M)</label>
-          <input type="text" id="ffmpeg-extra-input-args" name="ffmpeg_extra_input_args" value="${v('extra_input_args')}" placeholder="" style="width:100%;max-width:480px;">
+        <h3 class="ffmpeg-subsection-title">Advanced</h3>
+        <div class="form-grid-3">
+          <div class="form-field">
+            <label for="ffmpeg-reconnect-streamed">Reconnect streamed</label>
+            <input type="number" id="ffmpeg-reconnect-streamed" name="ffmpeg_reconnect_streamed" value="${v('reconnect_streamed')}" min="0" placeholder="1">
+          </div>
+          <div class="form-field">
+            <label for="ffmpeg-tune">Tune</label>
+            <input type="text" id="ffmpeg-tune" name="ffmpeg_tune" value="${v('tune')}" placeholder="zerolatency">
+          </div>
+          <div class="form-field">
+            <label for="ffmpeg-flags">Flags</label>
+            <input type="text" id="ffmpeg-flags" name="ffmpeg_flags" value="${v('flags')}" placeholder="-global_header">
+          </div>
         </div>
-        <div style="margin-top:0.5rem;">
-          <label for="ffmpeg-extra-output-args">Extra output arguments (space-separated)</label>
-          <input type="text" id="ffmpeg-extra-output-args" name="ffmpeg_extra_output_args" value="${v('extra_output_args')}" placeholder="" style="width:100%;max-width:480px;">
+        <div class="form-grid-3">
+          <div class="form-field">
+            <label for="ffmpeg-scale-vf">Scale filter</label>
+            <input type="text" id="ffmpeg-scale-vf" name="ffmpeg_scale_vf" value="${v('scale_vf')}" placeholder="scale=...">
+          </div>
+          <div class="form-field">
+            <label for="ffmpeg-color-range">Color range</label>
+            <input type="text" id="ffmpeg-color-range" name="ffmpeg_color_range" value="${v('color_range')}" placeholder="tv">
+          </div>
+          <div class="form-field">
+            <label for="ffmpeg-keyint-min">Keyint min</label>
+            <input type="number" id="ffmpeg-keyint-min" name="ffmpeg_keyint_min" value="${v('keyint_min')}" min="1" placeholder="16">
+          </div>
+        </div>
+        <div class="form-grid-2">
+          <div class="form-field">
+            <label for="ffmpeg-force-key-frames">Force key frames</label>
+            <input type="text" id="ffmpeg-force-key-frames" name="ffmpeg_force_key_frames" value="${v('force_key_frames')}" placeholder="expr:gte(t,n_forced*2)">
+          </div>
+          <div class="form-field">
+            <label for="ffmpeg-extra-input-args">Extra input args</label>
+            <input type="text" id="ffmpeg-extra-input-args" name="ffmpeg_extra_input_args" value="${v('extra_input_args')}" placeholder="-analyzeduration 1M">
+          </div>
+        </div>
+        <div class="form-grid-2">
+          <div class="form-field">
+            <label for="ffmpeg-extra-output-args">Extra output args</label>
+            <input type="text" id="ffmpeg-extra-output-args" name="ffmpeg_extra_output_args" value="${v('extra_output_args')}" placeholder="">
+          </div>
         </div>
       </div>`;
 }
@@ -478,39 +484,56 @@ router.get('/cameras/new', requireLogin, (req, res) => {
     ${breadcrumb({ label: 'Cameras', href: '/admin' }, { label: 'Add camera' })}
     <h1>Add camera</h1>
     ${req.query.msg ? `<div class="admin-msg">${escapeHtml(req.query.msg)}</div>` : ''}
-    <form method="post" action="/admin/cameras" class="admin-form">
+    <form method="post" action="/admin/cameras" class="admin-form camera-edit-form">
       ${csrfField(req)}
-      <div class="form-section">
-        <p class="form-section-title">Display</p>
-        <label for="cam-name">Camera name</label>
-        <input type="text" id="cam-name" name="display_name" required placeholder="e.g. Garden bird feeder">
-      </div>
-      <div class="form-section">
-        <p class="form-section-title">RTSP Connection</p>
-        <div class="form-row">
-          <div>
-            <label for="cam-host">Host / IP</label>
-            <input type="text" id="cam-host" name="rtsp_host" required placeholder="192.168.1.100">
-          </div>
-          <div class="form-col-sm">
-            <label for="cam-port">Port</label>
-            <input type="text" id="cam-port" name="rtsp_port" value="554" placeholder="554">
-          </div>
+      <div class="camera-edit-grid camera-edit-grid-single">
+        <div class="camera-edit-main">
+          <section class="form-card">
+            <h2 class="form-card-title">Camera Details</h2>
+            <div class="form-field">
+              <label for="cam-name">Camera name</label>
+              <input type="text" id="cam-name" name="display_name" required placeholder="e.g. Garden bird feeder">
+            </div>
+          </section>
+          <section class="form-card">
+            <h2 class="form-card-title">RTSP Connection</h2>
+            <div class="form-grid-2">
+              <div class="form-field">
+                <label for="cam-host">Host / IP</label>
+                <input type="text" id="cam-host" name="rtsp_host" required placeholder="192.168.1.100">
+              </div>
+              <div class="form-field form-field-small">
+                <label for="cam-port">Port</label>
+                <input type="text" id="cam-port" name="rtsp_port" value="554" placeholder="554">
+              </div>
+            </div>
+            <div class="form-field">
+              <label for="cam-path">Path</label>
+              <input type="text" id="cam-path" name="rtsp_path" placeholder="/stream1">
+            </div>
+            <div class="form-grid-2">
+              <div class="form-field">
+                <label for="cam-user">Username</label>
+                <input type="text" id="cam-user" name="rtsp_username" placeholder="admin" autocomplete="off">
+              </div>
+              <div class="form-field">
+                <label for="cam-pass">Password</label>
+                <input type="password" id="cam-pass" name="rtsp_password" placeholder="Optional" autocomplete="off">
+              </div>
+            </div>
+          </section>
+          <details class="form-card ffmpeg-details">
+            <summary class="form-card-title ffmpeg-summary">
+              <span>FFmpeg / Stream Options</span>
+              <span class="ffmpeg-badge">Advanced</span>
+            </summary>
+            <div class="ffmpeg-content">
+              <p class="form-card-desc">Override default streaming parameters. Most cameras work with defaults.</p>
+              ${ffmpegFormSection(ffmpegOpts)}
+            </div>
+          </details>
         </div>
-        <label for="cam-path">Path</label>
-        <input type="text" id="cam-path" name="rtsp_path" placeholder="/stream1">
-        <div class="form-row">
-          <div>
-            <label for="cam-user">Username</label>
-            <input type="text" id="cam-user" name="rtsp_username" placeholder="admin" autocomplete="off">
-          </div>
-          <div>
-            <label for="cam-pass">Password</label>
-            <input type="password" id="cam-pass" name="rtsp_password" placeholder="password" autocomplete="off">
-          </div>
-        </div>
       </div>
-      ${ffmpegFormSection(ffmpegOpts)}
       <div class="form-actions">
         <button type="submit" class="btn btn-primary">Add camera</button>
         <a href="/admin" class="btn btn-ghost">Cancel</a>
@@ -542,50 +565,83 @@ router.get('/cameras/:id/edit', requireLogin, (req, res) => {
   res.send(layout('Edit camera', nav('cameras'), `
     ${breadcrumb({ label: 'Cameras', href: '/admin' }, { label: escapeHtml(c.display_name) })}
     <h1>Edit camera</h1>
-    ${req.query.msg ? `<div class="admin-msg">${escapeHtml(req.query.msg)}</div>` : ''}
-    <form method="post" action="/admin/cameras/${c.id}" class="admin-form">
+    ${req.query.msg ? `<div class="admin-msg admin-msg-ok">${escapeHtml(req.query.msg)}</div>` : ''}
+    <form method="post" action="/admin/cameras/${c.id}" class="admin-form camera-edit-form">
       ${csrfField(req)}
-      <div class="form-section">
-        <p class="form-section-title">Display</p>
-        <label for="cam-name">Camera name</label>
-        <input type="text" id="cam-name" name="display_name" value="${escapeHtml(c.display_name)}" required>
-      </div>
-      <div class="form-section">
-        <p class="form-section-title">RTSP Connection</p>
-        <div class="form-row">
-          <div>
-            <label for="cam-host">Host / IP</label>
-            <input type="text" id="cam-host" name="rtsp_host" value="${escapeHtml(c.rtsp_host)}" required>
-          </div>
-          <div class="form-col-sm">
-            <label for="cam-port">Port</label>
-            <input type="text" id="cam-port" name="rtsp_port" value="${escapeHtml(String(c.rtsp_port || 554))}">
-          </div>
+      <div class="camera-edit-grid">
+        <div class="camera-edit-main">
+          <section class="form-card">
+            <h2 class="form-card-title">Camera Details</h2>
+            <div class="form-field">
+              <label for="cam-name">Camera name</label>
+              <input type="text" id="cam-name" name="display_name" value="${escapeHtml(c.display_name)}" required placeholder="e.g. Garden bird feeder">
+            </div>
+          </section>
+          <section class="form-card">
+            <h2 class="form-card-title">RTSP Connection</h2>
+            <div class="form-grid-2">
+              <div class="form-field">
+                <label for="cam-host">Host / IP</label>
+                <input type="text" id="cam-host" name="rtsp_host" value="${escapeHtml(c.rtsp_host)}" required placeholder="192.168.1.100">
+              </div>
+              <div class="form-field form-field-small">
+                <label for="cam-port">Port</label>
+                <input type="text" id="cam-port" name="rtsp_port" value="${escapeHtml(String(c.rtsp_port || 554))}" placeholder="554">
+              </div>
+            </div>
+            <div class="form-field">
+              <label for="cam-path">Path</label>
+              <input type="text" id="cam-path" name="rtsp_path" value="${escapeHtml(c.rtsp_path)}" placeholder="/stream1">
+            </div>
+            <div class="form-grid-2">
+              <div class="form-field">
+                <label for="cam-user">Username</label>
+                <input type="text" id="cam-user" name="rtsp_username" value="${escapeHtml(c.rtsp_username)}" autocomplete="off" placeholder="admin">
+              </div>
+              <div class="form-field">
+                <label for="cam-pass">Password</label>
+                <input type="password" id="cam-pass" name="rtsp_password" placeholder="${hasRtspPw ? 'Leave blank to keep current' : 'Optional'}" autocomplete="off">
+                ${hasRtspPw ? '<span class="form-field-hint">Password is set</span>' : ''}
+              </div>
+            </div>
+          </section>
+          <details class="form-card ffmpeg-details">
+            <summary class="form-card-title ffmpeg-summary">
+              <span>FFmpeg / Stream Options</span>
+              <span class="ffmpeg-badge">Advanced</span>
+            </summary>
+            <div class="ffmpeg-content">
+              <p class="form-card-desc">Override default streaming parameters. Most cameras work with defaults.</p>
+              ${ffmpegFormSection(ffmpegOpts)}
+            </div>
+          </details>
         </div>
-        <label for="cam-path">Path</label>
-        <input type="text" id="cam-path" name="rtsp_path" value="${escapeHtml(c.rtsp_path)}">
-        <div class="form-row">
-          <div>
-            <label for="cam-user">Username</label>
-            <input type="text" id="cam-user" name="rtsp_username" value="${escapeHtml(c.rtsp_username)}" autocomplete="off">
-          </div>
-          <div>
-            <label for="cam-pass">Password</label>
-            <input type="password" id="cam-pass" name="rtsp_password" placeholder="${hasRtspPw ? '(unchanged)' : ''}" autocomplete="off">
-            <p class="field-hint">${hasRtspPw ? 'Leave blank to keep current password.' : 'No password set.'}</p>
-          </div>
-        </div>
+        <aside class="camera-edit-sidebar">
+          <section class="form-card form-card-compact">
+            <h2 class="form-card-title">Quick Actions</h2>
+            <div class="action-list">
+              <form method="post" action="/admin/cameras/${c.id}/sync-time" class="action-form">
+                ${csrfField(req)}
+                <button type="submit" class="action-btn">
+                  <span class="action-icon">&#x1F551;</span>
+                  <span class="action-text">
+                    <strong>Sync camera time</strong>
+                    <small>Set camera clock to server time</small>
+                  </span>
+                </button>
+              </form>
+            </div>
+          </section>
+          <section class="form-card form-card-compact form-card-danger">
+            <h2 class="form-card-title">Danger Zone</h2>
+            <form method="post" action="/admin/cameras/${c.id}/delete" data-confirm="Delete camera &quot;${escapeHtml(c.display_name)}&quot;? This cannot be undone.">
+              ${csrfField(req)}
+              <button type="submit" class="btn btn-danger btn-block">Delete this camera</button>
+            </form>
+          </section>
+        </aside>
       </div>
-      <div class="form-section">
-        <p class="form-section-title">Camera Time Sync</p>
-        <p class="field-hint" style="margin-bottom:0.5rem;">Sync the camera's internal clock with this server's time. Uses XMEye protocol on port 34567.</p>
-        <form method="post" action="/admin/cameras/${c.id}/sync-time" style="display:inline">
-          ${csrfField(req)}
-          <button type="submit" class="btn btn-small">Sync camera time</button>
-        </form>
-      </div>
-      ${ffmpegFormSection(ffmpegOpts)}
-      <div class="form-actions">
+      <div class="form-actions form-actions-sticky">
         <button type="submit" class="btn btn-primary">Save changes</button>
         <a href="/admin" class="btn btn-ghost">Cancel</a>
       </div>
