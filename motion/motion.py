@@ -620,7 +620,7 @@ async def run_motion_loop(loop: asyncio.AbstractEventLoop, stop_event: asyncio.E
         )
         await asyncio.sleep(config.RECONNECT_DELAY_SEC)
         bg_subtractor = build_detector()
-        warmup_frames = 30
+        warmup_frames = config.WARMUP_FRAMES
 
 
 async def send_push_async(num_boxes: int):
