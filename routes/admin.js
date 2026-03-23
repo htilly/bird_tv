@@ -9,7 +9,7 @@ const streamManager = require('../streamManager');
 const { requireLogin, requireSetup, requireNoSetup } = require('../middleware/auth');
 const { auditLog } = require('../middleware/audit');
 const { DEFAULT_FFMPEG_OPTIONS } = streamManager;
-const { withSession } = require('../xmeye');
+const onvif = require('../onvif');
 
 function getFfmpegOptsForForm(camera) {
   const def = { ...DEFAULT_FFMPEG_OPTIONS };
@@ -522,6 +522,27 @@ router.get('/cameras/new', requireLogin, (req, res) => {
               </div>
             </div>
           </section>
+          <section class="form-card">
+            <h2 class="form-card-title">ONVIF Settings</h2>
+            <p class="form-card-desc">Used for camera settings, time sync, and reboot. Leave blank to use RTSP credentials.</p>
+            <div class="form-grid-2">
+              <div class="form-field form-field-small">
+                <label for="onvif-port">Port</label>
+                <input type="text" id="onvif-port" name="onvif_port" value="8899" placeholder="8899">
+              </div>
+              <div class="form-field"></div>
+            </div>
+            <div class="form-grid-2">
+              <div class="form-field">
+                <label for="onvif-user">Username</label>
+                <input type="text" id="onvif-user" name="onvif_username" placeholder="admin" autocomplete="off">
+              </div>
+              <div class="form-field">
+                <label for="onvif-pass">Password</label>
+                <input type="password" id="onvif-pass" name="onvif_password" placeholder="Optional" autocomplete="off">
+              </div>
+            </div>
+          </section>
           <details class="form-card ffmpeg-details">
             <summary class="form-card-title ffmpeg-summary">
               <span>FFmpeg / Stream Options</span>
@@ -543,12 +564,24 @@ router.get('/cameras/new', requireLogin, (req, res) => {
 });
 
 router.post('/cameras', requireLogin, verifyCsrf, auditLog('camera.create'), async (req, res) => {
-  const { display_name, rtsp_host, rtsp_port, rtsp_path, rtsp_username, rtsp_password } = req.body || {};
+  const { display_name, rtsp_host, rtsp_port, rtsp_path, rtsp_username, rtsp_password, onvif_port, onvif_username, onvif_password } = req.body || {};
   if (!display_name || !rtsp_host) return res.redirect('/admin/cameras/new');
   const port = parseInt(rtsp_port) || 554;
+  const onvifPort = parseInt(onvif_port) || 8899;
   const ffmpegOpts = { ...DEFAULT_FFMPEG_OPTIONS, ...ffmpegOptionsFromBody(req.body || {}) };
   try {
-    const id = db.createCamera(display_name.trim(), rtsp_host.trim(), port, (rtsp_path || '').trim(), (rtsp_username || '').trim(), (rtsp_password || '').trim(), JSON.stringify(ffmpegOpts));
+    const id = db.createCamera(
+      display_name.trim(),
+      rtsp_host.trim(),
+      port,
+      (rtsp_path || '').trim(),
+      (rtsp_username || '').trim(),
+      (rtsp_password || '').trim(),
+      JSON.stringify(ffmpegOpts),
+      onvifPort,
+      (onvif_username || '').trim(),
+      (onvif_password || '').trim()
+    );
     const cam = db.getCamera(id);
     await streamManager.startStream(id, cam);
     res.redirect('/admin');
@@ -561,7 +594,9 @@ router.get('/cameras/:id/edit', requireLogin, (req, res) => {
   const c = db.getCamera(Number(req.params.id));
   if (!c) return res.redirect('/admin');
   const hasRtspPw = c.rtsp_password ? true : false;
+  const hasOnvifPw = c.onvif_password ? true : false;
   const ffmpegOpts = getFfmpegOptsForForm(c);
+  const onvifCreds = db.getOnvifCredentials(c);
   res.send(layout('Edit camera', nav('cameras'), `
     ${breadcrumb({ label: 'Cameras', href: '/admin' }, { label: escapeHtml(c.display_name) })}
     <h1>Edit camera</h1>
@@ -602,6 +637,28 @@ router.get('/cameras/:id/edit', requireLogin, (req, res) => {
                 <label for="cam-pass">Password</label>
                 <input type="password" id="cam-pass" name="rtsp_password" placeholder="${hasRtspPw ? 'Leave blank to keep current' : 'Optional'}" autocomplete="off">
                 ${hasRtspPw ? '<span class="form-field-hint">Password is set</span>' : ''}
+              </div>
+            </div>
+          </section>
+          <section class="form-card">
+            <h2 class="form-card-title">ONVIF Settings</h2>
+            <p class="form-card-desc">Used for camera settings, time sync, and reboot. Leave blank to use RTSP credentials.</p>
+            <div class="form-grid-2">
+              <div class="form-field form-field-small">
+                <label for="onvif-port">Port</label>
+                <input type="text" id="onvif-port" name="onvif_port" value="${escapeHtml(String(c.onvif_port || 8899))}" placeholder="8899">
+              </div>
+              <div class="form-field"></div>
+            </div>
+            <div class="form-grid-2">
+              <div class="form-field">
+                <label for="onvif-user">Username</label>
+                <input type="text" id="onvif-user" name="onvif_username" value="${escapeHtml(c.onvif_username)}" autocomplete="off" placeholder="admin">
+              </div>
+              <div class="form-field">
+                <label for="onvif-pass">Password</label>
+                <input type="password" id="onvif-pass" name="onvif_password" placeholder="${hasOnvifPw ? 'Leave blank to keep current' : 'Optional'}" autocomplete="off">
+                ${hasOnvifPw ? '<span class="form-field-hint">Password is set</span>' : ''}
               </div>
             </div>
           </section>
@@ -648,7 +705,7 @@ router.get('/cameras/:id/edit', requireLogin, (req, res) => {
                 <span class="action-icon">&#x1F41B;</span>
                 <span class="action-text">
                   <strong>Debug</strong>
-                  <small>View XMEye protocol log</small>
+                  <small>View ONVIF protocol log</small>
                 </span>
               </a>
             </div>
@@ -686,13 +743,27 @@ router.post('/cameras/:id', requireLogin, verifyCsrf, auditLog('camera.update'),
   const id = Number(req.params.id);
   const c = db.getCamera(id);
   if (!c) return res.redirect('/admin');
-  const { display_name, rtsp_host, rtsp_port, rtsp_path, rtsp_username, rtsp_password } = req.body || {};
+  const { display_name, rtsp_host, rtsp_port, rtsp_path, rtsp_username, rtsp_password, onvif_port, onvif_username, onvif_password } = req.body || {};
   if (!display_name || !rtsp_host) return res.redirect(`/admin/cameras/${id}/edit`);
   const port = parseInt(rtsp_port) || 554;
+  const onvifPort = parseInt(onvif_port) || 8899;
   const password = rtsp_password || c.rtsp_password;
+  const onvifPw = onvif_password || c.onvif_password;
   const ffmpegOpts = { ...DEFAULT_FFMPEG_OPTIONS, ...ffmpegOptionsFromBody(req.body || {}) };
   try {
-    db.updateCamera(id, display_name.trim(), rtsp_host.trim(), port, (rtsp_path || '').trim(), (rtsp_username || '').trim(), (password || '').trim(), JSON.stringify(ffmpegOpts));
+    db.updateCamera(
+      id,
+      display_name.trim(),
+      rtsp_host.trim(),
+      port,
+      (rtsp_path || '').trim(),
+      (rtsp_username || '').trim(),
+      (password || '').trim(),
+      JSON.stringify(ffmpegOpts),
+      onvifPort,
+      (onvif_username || '').trim(),
+      (onvifPw || '').trim()
+    );
     await streamManager.stopStream(id);
     const updated = db.getCamera(id);
     await streamManager.startStream(id, updated);
@@ -717,17 +788,13 @@ router.post('/cameras/:id/sync-time', requireLogin, verifyCsrf, auditLog('camera
   if (!c) return res.redirect('/admin');
   try {
     const host = c.rtsp_host;
-    const port = 34567;
-    const username = c.rtsp_username || 'admin';
-    const password = c.rtsp_password || '';
-    const result = await withSession(host, port, username, password, async (session) => {
-      const beforeTime = await session.getTime();
-      const serverTime = new Date();
-      await session.syncTime();
-      return { beforeTime, serverTime };
-    });
+    const onvifCreds = db.getOnvifCredentials(c);
+    const cam = await onvif.createCam(host, onvifCreds.port, onvifCreds.username, onvifCreds.password);
+    const beforeTime = await onvif.getSystemDateAndTime(cam);
+    const serverTime = new Date();
+    await onvif.setSystemDateAndTime(cam, serverTime);
     const fmt = (d) => d ? d.toLocaleString('sv-SE') : 'unknown';
-    const msg = `Time synced: ${fmt(result.beforeTime)} → ${fmt(result.serverTime)}`;
+    const msg = `Time synced: ${fmt(beforeTime)} → ${fmt(serverTime)}`;
     res.redirect(`/admin/cameras/${id}/edit?msg=` + encodeURIComponent(msg));
   } catch (err) {
     console.error('Time sync failed:', err.message);
@@ -741,12 +808,9 @@ router.post('/cameras/:id/reboot', requireLogin, verifyCsrf, auditLog('camera.re
   if (!c) return res.redirect('/admin');
   try {
     const host = c.rtsp_host;
-    const port = 34567;
-    const username = c.rtsp_username || 'admin';
-    const password = c.rtsp_password || '';
-    await withSession(host, port, username, password, async (session) => {
-      await session.reboot();
-    });
+    const onvifCreds = db.getOnvifCredentials(c);
+    const cam = await onvif.createCam(host, onvifCreds.port, onvifCreds.username, onvifCreds.password);
+    await onvif.reboot(cam);
     await streamManager.stopStream(id);
     res.redirect(`/admin/cameras/${id}/edit?msg=` + encodeURIComponent('Reboot command sent. Camera will restart shortly.'));
   } catch (err) {
@@ -763,17 +827,14 @@ router.get('/cameras/:id/info', requireLogin, async (req, res) => {
   let error = null;
   try {
     const host = c.rtsp_host;
-    const port = 34567;
-    const username = c.rtsp_username || 'admin';
-    const password = c.rtsp_password || '';
-    info = await withSession(host, port, username, password, async (session) => {
-      const [general, cameraTime, encode] = await Promise.all([
-        session.getSystemInfo().catch(() => null),
-        session.getTime().catch(() => null),
-        session.getEncodeConfig().catch(() => null),
-      ]);
-      return { general, cameraTime, encode };
-    });
+    const onvifCreds = db.getOnvifCredentials(c);
+    const cam = await onvif.createCam(host, onvifCreds.port, onvifCreds.username, onvifCreds.password);
+    const [general, cameraTime, encode] = await Promise.all([
+      onvif.getDeviceInformation(cam).catch(() => null),
+      onvif.getSystemDateAndTime(cam).catch(() => null),
+      onvif.getVideoEncoderConfig(cam).catch(() => null),
+    ]);
+    info = { general, cameraTime, encode };
   } catch (err) {
     error = err.message;
   }
@@ -830,18 +891,14 @@ router.get('/cameras/:id/settings', requireLogin, async (req, res) => {
   let error = null;
   try {
     const host = c.rtsp_host;
-    const port = 34567;
-    const username = c.rtsp_username || 'admin';
-    const password = c.rtsp_password || '';
-    const result = await withSession(host, port, username, password, async (session) => {
-      const [cam, enc] = await Promise.all([
-        session.getCameraConfig().catch(() => null),
-        session.getEncodeConfig().catch(() => null),
-      ]);
-      return { cam, enc };
-    });
-    cameraConfig = result.cam;
-    encodeConfig = result.enc;
+    const onvifCreds = db.getOnvifCredentials(c);
+    const cam = await onvif.createCam(host, onvifCreds.port, onvifCreds.username, onvifCreds.password);
+    const [imaging, encode] = await Promise.all([
+      onvif.getImagingSettings(cam).catch(() => null),
+      onvif.getVideoEncoderConfig(cam).catch(() => null),
+    ]);
+    cameraConfig = imaging;
+    encodeConfig = encode;
   } catch (err) {
     error = err.message;
   }
@@ -865,20 +922,12 @@ router.get('/cameras/:id/settings', requireLogin, async (req, res) => {
             <input type="number" id="cam-contrast" name="contrast" value="${cameraConfig.Contrast ?? ''}" min="0" max="100">
           </div>
           <div class="form-field">
-            <label for="cam-hue">Hue</label>
-            <input type="number" id="cam-hue" name="hue" value="${cameraConfig.Hue ?? ''}" min="0" max="100">
-          </div>
-          <div class="form-field">
             <label for="cam-saturation">Saturation</label>
             <input type="number" id="cam-saturation" name="saturation" value="${cameraConfig.Saturation ?? ''}" min="0" max="100">
           </div>
           <div class="form-field">
             <label for="cam-sharpness">Sharpness</label>
             <input type="number" id="cam-sharpness" name="sharpness" value="${cameraConfig.Sharpness ?? ''}" min="0" max="100">
-          </div>
-          <div class="form-field">
-            <label for="cam-gain">Gain</label>
-            <input type="number" id="cam-gain" name="gain" value="${cameraConfig.Gain ?? ''}" min="0" max="100">
           </div>
         </div>
       </section>
@@ -905,12 +954,7 @@ router.get('/cameras/:id/settings', requireLogin, async (req, res) => {
           </div>
           <div class="form-field">
             <label for="enc-quality">Quality</label>
-            <select id="enc-quality" name="video_quality">
-              <option value="1" ${encodeConfig.Video?.Quality === 1 ? 'selected' : ''}>Low</option>
-              <option value="2" ${encodeConfig.Video?.Quality === 2 ? 'selected' : ''}>Medium</option>
-              <option value="3" ${encodeConfig.Video?.Quality === 3 ? 'selected' : ''}>High</option>
-              <option value="4" ${encodeConfig.Video?.Quality === 4 ? 'selected' : ''}>Best</option>
-            </select>
+            <input type="number" id="enc-quality" name="video_quality" value="${encodeConfig.Video?.Quality ?? ''}" min="1" max="4">
           </div>
           <div class="form-field">
             <label for="enc-iframe">I-Frame Interval</label>
@@ -933,34 +977,34 @@ router.post('/cameras/:id/settings', requireLogin, verifyCsrf, auditLog('camera.
   if (!c) return res.redirect('/admin');
   try {
     const host = c.rtsp_host;
-    const port = 34567;
-    const username = c.rtsp_username || 'admin';
-    const password = c.rtsp_password || '';
-    await withSession(host, port, username, password, async (session) => {
-      const body = req.body || {};
-      const cameraConfig = await session.getCameraConfig().catch(() => ({}));
-      const encodeConfig = await session.getEncodeConfig().catch(() => ({}));
-      if (body.brightness !== undefined || body.contrast !== undefined) {
-        const updates = {};
-        if (body.brightness !== undefined) updates.Brightness = parseInt(body.brightness);
-        if (body.contrast !== undefined) updates.Contrast = parseInt(body.contrast);
-        if (body.hue !== undefined) updates.Hue = parseInt(body.hue);
-        if (body.saturation !== undefined) updates.Saturation = parseInt(body.saturation);
-        if (body.sharpness !== undefined) updates.Sharpness = parseInt(body.sharpness);
-        if (body.gain !== undefined) updates.Gain = parseInt(body.gain);
-        await session.setCameraConfig(updates).catch(() => {});
+    const onvifCreds = db.getOnvifCredentials(c);
+    const cam = await onvif.createCam(host, onvifCreds.port, onvifCreds.username, onvifCreds.password);
+    const body = req.body || {};
+    
+    if (body.brightness !== undefined || body.contrast !== undefined || body.saturation !== undefined || body.sharpness !== undefined) {
+      const imagingUpdates = {};
+      if (body.brightness !== undefined && body.brightness !== '') imagingUpdates.Brightness = parseFloat(body.brightness);
+      if (body.contrast !== undefined && body.contrast !== '') imagingUpdates.Contrast = parseFloat(body.contrast);
+      if (body.saturation !== undefined && body.saturation !== '') imagingUpdates.Saturation = parseFloat(body.saturation);
+      if (body.sharpness !== undefined && body.sharpness !== '') imagingUpdates.Sharpness = parseFloat(body.sharpness);
+      if (Object.keys(imagingUpdates).length > 0) {
+        await onvif.setImagingSettings(cam, imagingUpdates).catch(() => {});
       }
-      if (body.video_width !== undefined || body.video_bitrate !== undefined) {
-        const videoUpdates = { ...encodeConfig.Video };
-        if (body.video_width !== undefined) videoUpdates.Width = parseInt(body.video_width);
-        if (body.video_height !== undefined) videoUpdates.Height = parseInt(body.video_height);
-        if (body.video_fps !== undefined) videoUpdates.FPS = parseInt(body.video_fps);
-        if (body.video_bitrate !== undefined) videoUpdates.BitRate = parseInt(body.video_bitrate);
-        if (body.video_quality !== undefined) videoUpdates.Quality = parseInt(body.video_quality);
-        if (body.video_iframe !== undefined) videoUpdates.GOP = parseInt(body.video_iframe);
-        await session.setEncodeConfig({ ...encodeConfig, Video: videoUpdates }).catch(() => {});
+    }
+    
+    if (body.video_width !== undefined || body.video_height !== undefined || body.video_fps !== undefined || body.video_bitrate !== undefined) {
+      const videoUpdates = {};
+      if (body.video_width !== undefined && body.video_width !== '') videoUpdates.Width = parseInt(body.video_width);
+      if (body.video_height !== undefined && body.video_height !== '') videoUpdates.Height = parseInt(body.video_height);
+      if (body.video_fps !== undefined && body.video_fps !== '') videoUpdates.FPS = parseInt(body.video_fps);
+      if (body.video_bitrate !== undefined && body.video_bitrate !== '') videoUpdates.BitRate = parseInt(body.video_bitrate);
+      if (body.video_quality !== undefined && body.video_quality !== '') videoUpdates.Quality = parseInt(body.video_quality);
+      if (body.video_iframe !== undefined && body.video_iframe !== '') videoUpdates.GOP = parseInt(body.video_iframe);
+      if (Object.keys(videoUpdates).length > 0) {
+        await onvif.setVideoEncoderConfig(cam, videoUpdates).catch(() => {});
       }
-    });
+    }
+    
     res.redirect(`/admin/cameras/${id}/settings?msg=` + encodeURIComponent('Settings saved'));
   } catch (err) {
     console.error('Settings save failed:', err.message);
@@ -972,86 +1016,46 @@ router.get('/cameras/:id/debug', requireLogin, async (req, res) => {
   const id = Number(req.params.id);
   const c = db.getCamera(id);
   if (!c) return res.redirect('/admin');
-  let log = [];
+  let results = {};
   let error = null;
   const cmd = req.query.cmd || 'info';
   try {
     const host = c.rtsp_host;
-    const port = 34567;
-    const username = c.rtsp_username || 'admin';
-    const password = c.rtsp_password || '';
-    const { XMEyeSession } = require('../xmeye');
-    const session = new XMEyeSession(host, port, true);
-    await session.connect();
-    try {
-      await session.login(username, password);
-      if (cmd === 'time') {
-        await session.getTime();
-      } else if (cmd === 'config') {
-        await session.getConfig('General');
-        await session.getConfig('Camera');
-        await session.getConfig('Simplify.Encode');
-      } else if (cmd === 'files') {
-        const now = new Date();
-        const yesterday = new Date(now - 24 * 60 * 60 * 1000);
-        await session.listFiles(0, yesterday, now);
-      } else {
-        await session.getSystemInfo();
-        await session.getTime();
-      }
-      log = session.getLog();
-    } finally {
-      session.close();
+    const onvifCreds = db.getOnvifCredentials(c);
+    const cam = await onvif.createCam(host, onvifCreds.port, onvifCreds.username, onvifCreds.password);
+    
+    if (cmd === 'time') {
+      results.time = await onvif.getSystemDateAndTime(cam);
+    } else if (cmd === 'config') {
+      results.imaging = await onvif.getImagingSettings(cam);
+      results.encoder = await onvif.getVideoEncoderConfig(cam);
+    } else {
+      results.info = await onvif.getDeviceInformation(cam);
+      results.time = await onvif.getSystemDateAndTime(cam);
     }
   } catch (err) {
     error = err.message;
   }
-  res.send(layout('XMEye Debug', nav('cameras'), `
+  res.send(layout('ONVIF Debug', nav('cameras'), `
     ${breadcrumb({ label: 'Cameras', href: '/admin' }, { label: escapeHtml(c.display_name), href: `/admin/cameras/${id}/edit` }, { label: 'Debug' })}
-    <h1>XMEye Debug: ${escapeHtml(c.display_name)}</h1>
+    <h1>ONVIF Debug: ${escapeHtml(c.display_name)}</h1>
     ${error ? `<div class="admin-msg">${escapeHtml(error)}</div>` : ''}
     <div class="debug-commands">
       <a href="/admin/cameras/${id}/debug?cmd=info" class="btn btn-small ${cmd === 'info' ? 'btn-primary' : 'btn-ghost'}">System Info</a>
       <a href="/admin/cameras/${id}/debug?cmd=time" class="btn btn-small ${cmd === 'time' ? 'btn-primary' : 'btn-ghost'}">Time Query</a>
       <a href="/admin/cameras/${id}/debug?cmd=config" class="btn btn-small ${cmd === 'config' ? 'btn-primary' : 'btn-ghost'}">All Configs</a>
-      <a href="/admin/cameras/${id}/debug?cmd=files" class="btn btn-small ${cmd === 'files' ? 'btn-primary' : 'btn-ghost'}">List Files</a>
     </div>
     <div class="debug-log-wrap">
-      <h2>Communication Log</h2>
-      ${log.length ? `
-        <pre class="debug-log-full">${log.map(e => {
-          const arrow = e.direction === 'send' ? '→' : '←';
-          const msgName = MSG_NAMES[e.msgId] || e.msgId;
-          const body = typeof e.body === 'object' ? JSON.stringify(e.body, null, 2) : (e.payload ? JSON.stringify(e.payload, null, 2) : '');
-          return `[${e.time}] ${arrow} ${msgName}\n${body}`;
-        }).join('\n\n')}</pre>
-      ` : '<p class="info-muted">No log entries</p>'}
+      <h2>Results</h2>
+      ${Object.keys(results).length ? `
+        <pre class="debug-log-full">${escapeHtml(JSON.stringify(results, null, 2))}</pre>
+      ` : '<p class="info-muted">No results</p>'}
     </div>
     <div class="form-actions">
       <a href="/admin/cameras/${id}/edit" class="btn btn-ghost">Back to camera</a>
     </div>
   `));
 });
-
-const MSG_NAMES = {
-  1000: 'LOGIN',
-  1001: 'LOGIN_RESP',
-  1002: 'LOGOUT',
-  1006: 'KEEPALIVE',
-  1007: 'KEEPALIVE_RESP',
-  1040: 'CONFIG_SET',
-  1041: 'CONFIG_SET_RESP',
-  1042: 'CONFIG_GET',
-  1043: 'CONFIG_GET_RESP',
-  1412: 'PLAYBACK_CLAIM',
-  1413: 'PLAYBACK_CLAIM_RESP',
-  1420: 'FILE_QUERY',
-  1421: 'FILE_QUERY_RESP',
-  1450: 'TIME_SETTING',
-  1451: 'TIME_SETTING_RESP',
-  1452: 'TIME_QUERY',
-  1453: 'TIME_QUERY_RESP',
-};
 
 function formatInfoValue(value) {
   if (value == null) return '<span class="info-muted">—</span>';
