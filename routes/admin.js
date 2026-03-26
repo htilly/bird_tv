@@ -6,9 +6,11 @@ const os = require('os');
 const router = express.Router();
 const db = require('../db');
 const streamManager = require('../streamManager');
+const timeSyncScheduler = require('../timeSyncScheduler');
 const { requireLogin, requireSetup, requireNoSetup } = require('../middleware/auth');
 const { auditLog } = require('../middleware/audit');
 const { DEFAULT_FFMPEG_OPTIONS } = streamManager;
+const onvif = require('../onvif');
 
 function getFfmpegOptsForForm(camera) {
   const def = { ...DEFAULT_FFMPEG_OPTIONS };
@@ -56,155 +58,161 @@ function ffmpegOptionsFromBody(body) {
 function ffmpegFormSection(opts) {
   const v = (key) => escapeHtml(String(opts[key] ?? ''));
   return `
-      <div class="form-section">
-        <p class="form-section-title">FFmpeg / Stream options</p>
-        <p class="field-hint" style="margin-bottom:0.75rem;">Override defaults for this camera. Leave defaults for typical IP cameras.</p>
-        <div class="form-row">
-          <div>
+      <div class="ffmpeg-section">
+        <h3 class="ffmpeg-subsection-title">Connection</h3>
+        <div class="form-grid-3">
+          <div class="form-field">
             <label for="ffmpeg-rtsp-transport">RTSP transport</label>
             <select id="ffmpeg-rtsp-transport" name="ffmpeg_rtsp_transport">
-              <option value="tcp" ${opts.rtsp_transport === 'tcp' ? 'selected' : ''}>tcp</option>
-              <option value="udp" ${opts.rtsp_transport === 'udp' ? 'selected' : ''}>udp</option>
-              <option value="http" ${opts.rtsp_transport === 'http' ? 'selected' : ''}>http</option>
+              <option value="tcp" ${opts.rtsp_transport === 'tcp' ? 'selected' : ''}>TCP</option>
+              <option value="udp" ${opts.rtsp_transport === 'udp' ? 'selected' : ''}>UDP</option>
+              <option value="http" ${opts.rtsp_transport === 'http' ? 'selected' : ''}>HTTP</option>
             </select>
           </div>
-          <div>
+          <div class="form-field">
             <label for="ffmpeg-reconnect">Reconnect</label>
             <input type="number" id="ffmpeg-reconnect" name="ffmpeg_reconnect" value="${v('reconnect')}" min="0" placeholder="1">
           </div>
-          <div>
-            <label for="ffmpeg-reconnect-streamed">Reconnect streamed</label>
-            <input type="number" id="ffmpeg-reconnect-streamed" name="ffmpeg_reconnect_streamed" value="${v('reconnect_streamed')}" min="0" placeholder="1">
-          </div>
-          <div>
-            <label for="ffmpeg-reconnect-delay-max">Reconnect delay max (s)</label>
+          <div class="form-field">
+            <label for="ffmpeg-reconnect-delay-max">Reconnect delay (s)</label>
             <input type="number" id="ffmpeg-reconnect-delay-max" name="ffmpeg_reconnect_delay_max" value="${v('reconnect_delay_max')}" min="0" placeholder="5">
           </div>
         </div>
-        <div class="form-row">
-          <div>
-            <label for="ffmpeg-fflags">Input fflags</label>
+        <div class="form-grid-3">
+          <div class="form-field">
+            <label for="ffmpeg-fflags">Input flags</label>
             <input type="text" id="ffmpeg-fflags" name="ffmpeg_fflags" value="${v('fflags')}" placeholder="genpts+discardcorrupt">
           </div>
-          <div>
-            <label for="ffmpeg-input-fps">Input FPS (-r)</label>
-            <input type="number" id="ffmpeg-input-fps" name="ffmpeg_input_fps" value="${v('input_fps')}" min="0" placeholder="8" title="0 = use camera default">
+          <div class="form-field">
+            <label for="ffmpeg-input-fps">Input FPS</label>
+            <input type="number" id="ffmpeg-input-fps" name="ffmpeg_input_fps" value="${v('input_fps')}" min="0" placeholder="auto">
           </div>
-          <div>
+          <div class="form-field">
             <label for="ffmpeg-max-delay">Max delay (s)</label>
             <input type="number" id="ffmpeg-max-delay" name="ffmpeg_max_delay" value="${v('max_delay')}" placeholder="2">
           </div>
-          <div>
-            <label for="ffmpeg-flags">Flags</label>
-            <input type="text" id="ffmpeg-flags" name="ffmpeg_flags" value="${v('flags')}" placeholder="-global_header">
-          </div>
         </div>
-        <p class="form-section-title" style="margin-top:1rem;">Video</p>
-        <div class="form-row">
-          <div>
-            <label for="ffmpeg-video-codec">Video codec</label>
+        <h3 class="ffmpeg-subsection-title">Video Encoding</h3>
+        <div class="form-grid-3">
+          <div class="form-field">
+            <label for="ffmpeg-video-codec">Codec</label>
             <select id="ffmpeg-video-codec" name="ffmpeg_video_codec">
-              <option value="libx264" ${opts.video_codec === 'libx264' ? 'selected' : ''}>libx264 (re-encode)</option>
-              <option value="copy" ${opts.video_codec === 'copy' ? 'selected' : ''}>copy (passthrough)</option>
+              <option value="copy" ${opts.video_codec === 'copy' ? 'selected' : ''}>Copy (passthrough)</option>
+              <option value="libx264" ${opts.video_codec === 'libx264' ? 'selected' : ''}>H.264 (re-encode)</option>
             </select>
           </div>
-          <div>
+          <div class="form-field">
             <label for="ffmpeg-preset">Preset</label>
             <select id="ffmpeg-preset" name="ffmpeg_preset">
-              <option value="ultrafast" ${opts.preset === 'ultrafast' ? 'selected' : ''}>ultrafast</option>
-              <option value="superfast" ${opts.preset === 'superfast' ? 'selected' : ''}>superfast</option>
-              <option value="veryfast" ${opts.preset === 'veryfast' ? 'selected' : ''}>veryfast</option>
-              <option value="fast" ${opts.preset === 'fast' ? 'selected' : ''}>fast</option>
-              <option value="medium" ${opts.preset === 'medium' ? 'selected' : ''}>medium</option>
-              <option value="slow" ${opts.preset === 'slow' ? 'selected' : ''}>slow</option>
+              <option value="ultrafast" ${opts.preset === 'ultrafast' ? 'selected' : ''}>Ultrafast</option>
+              <option value="superfast" ${opts.preset === 'superfast' ? 'selected' : ''}>Superfast</option>
+              <option value="veryfast" ${opts.preset === 'veryfast' ? 'selected' : ''}>Veryfast</option>
+              <option value="fast" ${opts.preset === 'fast' ? 'selected' : ''}>Fast</option>
+              <option value="medium" ${opts.preset === 'medium' ? 'selected' : ''}>Medium</option>
+              <option value="slow" ${opts.preset === 'slow' ? 'selected' : ''}>Slow</option>
             </select>
           </div>
-          <div>
-            <label for="ffmpeg-tune">Tune</label>
-            <input type="text" id="ffmpeg-tune" name="ffmpeg_tune" value="${v('tune')}" placeholder="zerolatency">
-          </div>
-          <div>
-            <label for="ffmpeg-crf">CRF (0–51)</label>
+          <div class="form-field">
+            <label for="ffmpeg-crf">CRF Quality</label>
             <input type="number" id="ffmpeg-crf" name="ffmpeg_crf" value="${v('crf')}" min="0" max="51" placeholder="28">
           </div>
-          <div>
+        </div>
+        <div class="form-grid-3">
+          <div class="form-field">
+            <label for="ffmpeg-fps-mode">FPS mode</label>
+            <select id="ffmpeg-fps-mode" name="ffmpeg_fps_mode">
+              <option value="vfr" ${opts.fps_mode === 'vfr' ? 'selected' : ''}>Variable (VFR)</option>
+              <option value="cfr" ${opts.fps_mode === 'cfr' ? 'selected' : ''}>Constant (CFR)</option>
+              <option value="passthrough" ${opts.fps_mode === 'passthrough' ? 'selected' : ''}>Passthrough</option>
+            </select>
+          </div>
+          <div class="form-field">
+            <label for="ffmpeg-g">GOP size</label>
+            <input type="number" id="ffmpeg-g" name="ffmpeg_g" value="${v('g')}" min="1" placeholder="16">
+          </div>
+          <div class="form-field">
             <label for="ffmpeg-pix-fmt">Pixel format</label>
             <input type="text" id="ffmpeg-pix-fmt" name="ffmpeg_pix_fmt" value="${v('pix_fmt')}" placeholder="yuv420p">
           </div>
-          <div>
-            <label for="ffmpeg-fps-mode">Frame rate mode</label>
-            <select id="ffmpeg-fps-mode" name="ffmpeg_fps_mode">
-              <option value="vfr" ${opts.fps_mode === 'vfr' ? 'selected' : ''}>vfr (variable — recommended)</option>
-              <option value="cfr" ${opts.fps_mode === 'cfr' ? 'selected' : ''}>cfr (constant)</option>
-              <option value="passthrough" ${opts.fps_mode === 'passthrough' ? 'selected' : ''}>passthrough</option>
-            </select>
-          </div>
         </div>
-        <div class="form-row">
-          <div style="flex:1;">
-            <label for="ffmpeg-scale-vf">Scale filter (-vf)</label>
-            <input type="text" id="ffmpeg-scale-vf" name="ffmpeg_scale_vf" value="${v('scale_vf')}" placeholder="scale=in_range=full:out_range=tv" style="width:100%;">
-          </div>
-          <div>
-            <label for="ffmpeg-color-range">Color range</label>
-            <input type="text" id="ffmpeg-color-range" name="ffmpeg_color_range" value="${v('color_range')}" placeholder="tv">
-          </div>
-        </div>
-        <div class="form-row">
-          <div>
-            <label for="ffmpeg-g">GOP size (keyframe interval)</label>
-            <input type="number" id="ffmpeg-g" name="ffmpeg_g" value="${v('g')}" min="1" placeholder="16">
-          </div>
-          <div>
-            <label for="ffmpeg-keyint-min">Keyint min</label>
-            <input type="number" id="ffmpeg-keyint-min" name="ffmpeg_keyint_min" value="${v('keyint_min')}" min="1" placeholder="16">
-          </div>
-          <div style="flex:1;">
-            <label for="ffmpeg-force-key-frames">Force key frames</label>
-            <input type="text" id="ffmpeg-force-key-frames" name="ffmpeg_force_key_frames" value="${v('force_key_frames')}" placeholder="expr:gte(t,n_forced*2)">
-          </div>
-        </div>
-        <p class="form-section-title" style="margin-top:1rem;">Audio</p>
-        <div class="form-row">
-          <div>
+        <h3 class="ffmpeg-subsection-title">Audio</h3>
+        <div class="form-grid-3">
+          <div class="form-field">
             <label for="ffmpeg-audio-codec">Audio codec</label>
             <select id="ffmpeg-audio-codec" name="ffmpeg_audio_codec">
-              <option value="aac" ${opts.audio_codec === 'aac' ? 'selected' : ''}>aac</option>
-              <option value="copy" ${opts.audio_codec === 'copy' ? 'selected' : ''}>copy</option>
-              <option value="none" ${opts.audio_codec === 'none' ? 'selected' : ''}>none (no audio)</option>
+              <option value="copy" ${opts.audio_codec === 'copy' ? 'selected' : ''}>Copy</option>
+              <option value="aac" ${opts.audio_codec === 'aac' ? 'selected' : ''}>AAC</option>
+              <option value="none" ${opts.audio_codec === 'none' ? 'selected' : ''}>None</option>
             </select>
           </div>
-          <div>
+          <div class="form-field">
             <label for="ffmpeg-audio-channels">Channels</label>
             <input type="number" id="ffmpeg-audio-channels" name="ffmpeg_audio_channels" value="${v('audio_channels')}" min="0" placeholder="1">
           </div>
-          <div>
-            <label for="ffmpeg-audio-sample-rate">Sample rate (Hz)</label>
+          <div class="form-field">
+            <label for="ffmpeg-audio-sample-rate">Sample rate</label>
             <input type="number" id="ffmpeg-audio-sample-rate" name="ffmpeg_audio_sample_rate" value="${v('audio_sample_rate')}" placeholder="44100">
           </div>
         </div>
-        <p class="form-section-title" style="margin-top:1rem;">HLS output</p>
-        <div class="form-row">
-          <div>
-            <label for="ffmpeg-hls-time">HLS segment length (s)</label>
+        <h3 class="ffmpeg-subsection-title">HLS Output</h3>
+        <div class="form-grid-3">
+          <div class="form-field">
+            <label for="ffmpeg-hls-time">Segment length (s)</label>
             <input type="number" id="ffmpeg-hls-time" name="ffmpeg_hls_time" value="${v('hls_time')}" min="1" placeholder="2">
           </div>
-          <div>
-            <label for="ffmpeg-hls-list-size">HLS list size (segments)</label>
-            <input type="number" id="ffmpeg-hls-list-size" name="ffmpeg_hls_list_size" value="${v('hls_list_size')}" min="0" placeholder="3">
+          <div class="form-field">
+            <label for="ffmpeg-hls-list-size">List size</label>
+            <input type="number" id="ffmpeg-hls-list-size" name="ffmpeg_hls_list_size" value="${v('hls_list_size')}" min="0" placeholder="6">
           </div>
-          <div style="flex:1;">
+          <div class="form-field">
             <label for="ffmpeg-hls-flags">HLS flags</label>
             <input type="text" id="ffmpeg-hls-flags" name="ffmpeg_hls_flags" value="${v('hls_flags')}" placeholder="delete_segments">
           </div>
         </div>
-        <div style="margin-top:0.75rem;">
-          <label for="ffmpeg-extra-input-args">Extra input arguments (space-separated, e.g. -analyzeduration 1M)</label>
-          <input type="text" id="ffmpeg-extra-input-args" name="ffmpeg_extra_input_args" value="${v('extra_input_args')}" placeholder="" style="width:100%;max-width:480px;">
+        <h3 class="ffmpeg-subsection-title">Advanced</h3>
+        <div class="form-grid-3">
+          <div class="form-field">
+            <label for="ffmpeg-reconnect-streamed">Reconnect streamed</label>
+            <input type="number" id="ffmpeg-reconnect-streamed" name="ffmpeg_reconnect_streamed" value="${v('reconnect_streamed')}" min="0" placeholder="1">
+          </div>
+          <div class="form-field">
+            <label for="ffmpeg-tune">Tune</label>
+            <input type="text" id="ffmpeg-tune" name="ffmpeg_tune" value="${v('tune')}" placeholder="zerolatency">
+          </div>
+          <div class="form-field">
+            <label for="ffmpeg-flags">Flags</label>
+            <input type="text" id="ffmpeg-flags" name="ffmpeg_flags" value="${v('flags')}" placeholder="-global_header">
+          </div>
         </div>
-        <div style="margin-top:0.5rem;">
-          <label for="ffmpeg-extra-output-args">Extra output arguments (space-separated)</label>
-          <input type="text" id="ffmpeg-extra-output-args" name="ffmpeg_extra_output_args" value="${v('extra_output_args')}" placeholder="" style="width:100%;max-width:480px;">
+        <div class="form-grid-3">
+          <div class="form-field">
+            <label for="ffmpeg-scale-vf">Scale filter</label>
+            <input type="text" id="ffmpeg-scale-vf" name="ffmpeg_scale_vf" value="${v('scale_vf')}" placeholder="scale=...">
+          </div>
+          <div class="form-field">
+            <label for="ffmpeg-color-range">Color range</label>
+            <input type="text" id="ffmpeg-color-range" name="ffmpeg_color_range" value="${v('color_range')}" placeholder="tv">
+          </div>
+          <div class="form-field">
+            <label for="ffmpeg-keyint-min">Keyint min</label>
+            <input type="number" id="ffmpeg-keyint-min" name="ffmpeg_keyint_min" value="${v('keyint_min')}" min="1" placeholder="16">
+          </div>
+        </div>
+        <div class="form-grid-2">
+          <div class="form-field">
+            <label for="ffmpeg-force-key-frames">Force key frames</label>
+            <input type="text" id="ffmpeg-force-key-frames" name="ffmpeg_force_key_frames" value="${v('force_key_frames')}" placeholder="expr:gte(t,n_forced*2)">
+          </div>
+          <div class="form-field">
+            <label for="ffmpeg-extra-input-args">Extra input args</label>
+            <input type="text" id="ffmpeg-extra-input-args" name="ffmpeg_extra_input_args" value="${v('extra_input_args')}" placeholder="-analyzeduration 1M">
+          </div>
+        </div>
+        <div class="form-grid-2">
+          <div class="form-field">
+            <label for="ffmpeg-extra-output-args">Extra output args</label>
+            <input type="text" id="ffmpeg-extra-output-args" name="ffmpeg_extra_output_args" value="${v('extra_output_args')}" placeholder="">
+          </div>
         </div>
       </div>`;
 }
@@ -333,7 +341,7 @@ router.get('/login', (req, res) => {
   if (!hasUser) return res.redirect('/admin/setup');
   res.send(layout('Login', '', `
     <div class="login-box">
-      <img src="/logo.png" alt="Birdcam Live" style="display:block;margin:0 auto 1rem;height:6rem;width:auto;">
+      <img src="/admin.png" alt="Birdcam Admin" class="admin-login-icon">
       <h1>Log in to Birdcam</h1>
       ${req.query.msg ? `<div class="admin-msg">${escapeHtml(req.query.msg)}</div>` : ''}
       <form method="post" action="/admin/login" class="admin-form">
@@ -477,39 +485,77 @@ router.get('/cameras/new', requireLogin, (req, res) => {
     ${breadcrumb({ label: 'Cameras', href: '/admin' }, { label: 'Add camera' })}
     <h1>Add camera</h1>
     ${req.query.msg ? `<div class="admin-msg">${escapeHtml(req.query.msg)}</div>` : ''}
-    <form method="post" action="/admin/cameras" class="admin-form">
+    <form method="post" action="/admin/cameras" class="admin-form camera-edit-form">
       ${csrfField(req)}
-      <div class="form-section">
-        <p class="form-section-title">Display</p>
-        <label for="cam-name">Camera name</label>
-        <input type="text" id="cam-name" name="display_name" required placeholder="e.g. Garden bird feeder">
-      </div>
-      <div class="form-section">
-        <p class="form-section-title">RTSP Connection</p>
-        <div class="form-row">
-          <div>
-            <label for="cam-host">Host / IP</label>
-            <input type="text" id="cam-host" name="rtsp_host" required placeholder="192.168.1.100">
-          </div>
-          <div class="form-col-sm">
-            <label for="cam-port">Port</label>
-            <input type="text" id="cam-port" name="rtsp_port" value="554" placeholder="554">
-          </div>
+      <div class="camera-edit-grid camera-edit-grid-single">
+        <div class="camera-edit-main">
+          <section class="form-card">
+            <h2 class="form-card-title">Camera Details</h2>
+            <div class="form-field">
+              <label for="cam-name">Camera name</label>
+              <input type="text" id="cam-name" name="display_name" required placeholder="e.g. Garden bird feeder">
+            </div>
+          </section>
+          <section class="form-card">
+            <h2 class="form-card-title">RTSP Connection</h2>
+            <div class="form-grid-2">
+              <div class="form-field">
+                <label for="cam-host">Host / IP</label>
+                <input type="text" id="cam-host" name="rtsp_host" required placeholder="192.168.1.100">
+              </div>
+              <div class="form-field form-field-small">
+                <label for="cam-port">Port</label>
+                <input type="text" id="cam-port" name="rtsp_port" value="554" placeholder="554">
+              </div>
+            </div>
+            <div class="form-field">
+              <label for="cam-path">Path</label>
+              <input type="text" id="cam-path" name="rtsp_path" placeholder="/stream1">
+            </div>
+            <div class="form-grid-2">
+              <div class="form-field">
+                <label for="cam-user">Username</label>
+                <input type="text" id="cam-user" name="rtsp_username" placeholder="admin" autocomplete="off">
+              </div>
+              <div class="form-field">
+                <label for="cam-pass">Password</label>
+                <input type="password" id="cam-pass" name="rtsp_password" placeholder="Optional" autocomplete="off">
+              </div>
+            </div>
+          </section>
+          <section class="form-card">
+            <h2 class="form-card-title">ONVIF Settings</h2>
+            <p class="form-card-desc">Used for camera settings, time sync, and reboot. Leave blank to use RTSP credentials.</p>
+            <div class="form-grid-2">
+              <div class="form-field form-field-small">
+                <label for="onvif-port">Port</label>
+                <input type="text" id="onvif-port" name="onvif_port" value="8899" placeholder="8899">
+              </div>
+              <div class="form-field"></div>
+            </div>
+            <div class="form-grid-2">
+              <div class="form-field">
+                <label for="onvif-user">Username</label>
+                <input type="text" id="onvif-user" name="onvif_username" placeholder="admin" autocomplete="off">
+              </div>
+              <div class="form-field">
+                <label for="onvif-pass">Password</label>
+                <input type="password" id="onvif-pass" name="onvif_password" placeholder="Optional" autocomplete="off">
+              </div>
+            </div>
+          </section>
+          <details class="form-card ffmpeg-details">
+            <summary class="form-card-title ffmpeg-summary">
+              <span>FFmpeg / Stream Options</span>
+              <span class="ffmpeg-badge">Advanced</span>
+            </summary>
+            <div class="ffmpeg-content">
+              <p class="form-card-desc">Override default streaming parameters. Most cameras work with defaults.</p>
+              ${ffmpegFormSection(ffmpegOpts)}
+            </div>
+          </details>
         </div>
-        <label for="cam-path">Path</label>
-        <input type="text" id="cam-path" name="rtsp_path" placeholder="/stream1">
-        <div class="form-row">
-          <div>
-            <label for="cam-user">Username</label>
-            <input type="text" id="cam-user" name="rtsp_username" placeholder="admin" autocomplete="off">
-          </div>
-          <div>
-            <label for="cam-pass">Password</label>
-            <input type="password" id="cam-pass" name="rtsp_password" placeholder="password" autocomplete="off">
-          </div>
-        </div>
       </div>
-      ${ffmpegFormSection(ffmpegOpts)}
       <div class="form-actions">
         <button type="submit" class="btn btn-primary">Add camera</button>
         <a href="/admin" class="btn btn-ghost">Cancel</a>
@@ -519,12 +565,24 @@ router.get('/cameras/new', requireLogin, (req, res) => {
 });
 
 router.post('/cameras', requireLogin, verifyCsrf, auditLog('camera.create'), async (req, res) => {
-  const { display_name, rtsp_host, rtsp_port, rtsp_path, rtsp_username, rtsp_password } = req.body || {};
+  const { display_name, rtsp_host, rtsp_port, rtsp_path, rtsp_username, rtsp_password, onvif_port, onvif_username, onvif_password } = req.body || {};
   if (!display_name || !rtsp_host) return res.redirect('/admin/cameras/new');
   const port = parseInt(rtsp_port) || 554;
+  const onvifPort = parseInt(onvif_port) || 8899;
   const ffmpegOpts = { ...DEFAULT_FFMPEG_OPTIONS, ...ffmpegOptionsFromBody(req.body || {}) };
   try {
-    const id = db.createCamera(display_name.trim(), rtsp_host.trim(), port, (rtsp_path || '').trim(), (rtsp_username || '').trim(), (rtsp_password || '').trim(), JSON.stringify(ffmpegOpts));
+    const id = db.createCamera(
+      display_name.trim(),
+      rtsp_host.trim(),
+      port,
+      (rtsp_path || '').trim(),
+      (rtsp_username || '').trim(),
+      (rtsp_password || '').trim(),
+      JSON.stringify(ffmpegOpts),
+      onvifPort,
+      (onvif_username || '').trim(),
+      (onvif_password || '').trim()
+    );
     const cam = db.getCamera(id);
     await streamManager.startStream(id, cam);
     res.redirect('/admin');
@@ -537,46 +595,158 @@ router.get('/cameras/:id/edit', requireLogin, (req, res) => {
   const c = db.getCamera(Number(req.params.id));
   if (!c) return res.redirect('/admin');
   const hasRtspPw = c.rtsp_password ? true : false;
+  const hasOnvifPw = c.onvif_password ? true : false;
   const ffmpegOpts = getFfmpegOptsForForm(c);
+  const onvifCreds = db.getOnvifCredentials(c);
   res.send(layout('Edit camera', nav('cameras'), `
     ${breadcrumb({ label: 'Cameras', href: '/admin' }, { label: escapeHtml(c.display_name) })}
     <h1>Edit camera</h1>
-    ${req.query.msg ? `<div class="admin-msg">${escapeHtml(req.query.msg)}</div>` : ''}
-    <form method="post" action="/admin/cameras/${c.id}" class="admin-form">
+    ${req.query.msg ? `<div class="admin-msg admin-msg-ok">${escapeHtml(req.query.msg)}</div>` : ''}
+    <form method="post" action="/admin/cameras/${c.id}" class="admin-form camera-edit-form">
       ${csrfField(req)}
-      <div class="form-section">
-        <p class="form-section-title">Display</p>
-        <label for="cam-name">Camera name</label>
-        <input type="text" id="cam-name" name="display_name" value="${escapeHtml(c.display_name)}" required>
-      </div>
-      <div class="form-section">
-        <p class="form-section-title">RTSP Connection</p>
-        <div class="form-row">
-          <div>
-            <label for="cam-host">Host / IP</label>
-            <input type="text" id="cam-host" name="rtsp_host" value="${escapeHtml(c.rtsp_host)}" required>
-          </div>
-          <div class="form-col-sm">
-            <label for="cam-port">Port</label>
-            <input type="text" id="cam-port" name="rtsp_port" value="${escapeHtml(String(c.rtsp_port || 554))}">
-          </div>
+      <div class="camera-edit-grid">
+        <div class="camera-edit-main">
+          <section class="form-card">
+            <h2 class="form-card-title">Camera Details</h2>
+            <div class="form-field">
+              <label for="cam-name">Camera name</label>
+              <input type="text" id="cam-name" name="display_name" value="${escapeHtml(c.display_name)}" required placeholder="e.g. Garden bird feeder">
+            </div>
+          </section>
+          <section class="form-card">
+            <h2 class="form-card-title">RTSP Connection</h2>
+            <div class="form-grid-2">
+              <div class="form-field">
+                <label for="cam-host">Host / IP</label>
+                <input type="text" id="cam-host" name="rtsp_host" value="${escapeHtml(c.rtsp_host)}" required placeholder="192.168.1.100">
+              </div>
+              <div class="form-field form-field-small">
+                <label for="cam-port">Port</label>
+                <input type="text" id="cam-port" name="rtsp_port" value="${escapeHtml(String(c.rtsp_port || 554))}" placeholder="554">
+              </div>
+            </div>
+            <div class="form-field">
+              <label for="cam-path">Path</label>
+              <input type="text" id="cam-path" name="rtsp_path" value="${escapeHtml(c.rtsp_path)}" placeholder="/stream1">
+            </div>
+            <div class="form-grid-2">
+              <div class="form-field">
+                <label for="cam-user">Username</label>
+                <input type="text" id="cam-user" name="rtsp_username" value="${escapeHtml(c.rtsp_username)}" autocomplete="off" placeholder="admin">
+              </div>
+              <div class="form-field">
+                <label for="cam-pass">Password</label>
+                <input type="password" id="cam-pass" name="rtsp_password" placeholder="${hasRtspPw ? 'Leave blank to keep current' : 'Optional'}" autocomplete="off">
+                ${hasRtspPw ? '<span class="form-field-hint">Password is set</span>' : ''}
+              </div>
+            </div>
+          </section>
+          <section class="form-card">
+            <h2 class="form-card-title">ONVIF Settings</h2>
+            <p class="form-card-desc">Used for camera settings, time sync, and reboot. Leave blank to use RTSP credentials.</p>
+            <div class="form-grid-2">
+              <div class="form-field form-field-small">
+                <label for="onvif-port">Port</label>
+                <input type="text" id="onvif-port" name="onvif_port" value="${escapeHtml(String(c.onvif_port || 8899))}" placeholder="8899">
+              </div>
+              <div class="form-field"></div>
+            </div>
+            <div class="form-grid-2">
+              <div class="form-field">
+                <label for="onvif-user">Username</label>
+                <input type="text" id="onvif-user" name="onvif_username" value="${escapeHtml(c.onvif_username)}" autocomplete="off" placeholder="admin">
+              </div>
+              <div class="form-field">
+                <label for="onvif-pass">Password</label>
+                <input type="password" id="onvif-pass" name="onvif_password" placeholder="${hasOnvifPw ? 'Leave blank to keep current' : 'Optional'}" autocomplete="off">
+                ${hasOnvifPw ? '<span class="form-field-hint">Password is set</span>' : ''}
+              </div>
+            </div>
+          </section>
+          <details class="form-card ffmpeg-details">
+            <summary class="form-card-title ffmpeg-summary">
+              <span>FFmpeg / Stream Options</span>
+              <span class="ffmpeg-badge">Advanced</span>
+            </summary>
+            <div class="ffmpeg-content">
+              <p class="form-card-desc">Override default streaming parameters. Most cameras work with defaults.</p>
+              ${ffmpegFormSection(ffmpegOpts)}
+            </div>
+          </details>
         </div>
-        <label for="cam-path">Path</label>
-        <input type="text" id="cam-path" name="rtsp_path" value="${escapeHtml(c.rtsp_path)}">
-        <div class="form-row">
-          <div>
-            <label for="cam-user">Username</label>
-            <input type="text" id="cam-user" name="rtsp_username" value="${escapeHtml(c.rtsp_username)}" autocomplete="off">
-          </div>
-          <div>
-            <label for="cam-pass">Password</label>
-            <input type="password" id="cam-pass" name="rtsp_password" placeholder="${hasRtspPw ? '(unchanged)' : ''}" autocomplete="off">
-            <p class="field-hint">${hasRtspPw ? 'Leave blank to keep current password.' : 'No password set.'}</p>
-          </div>
-        </div>
+        <aside class="camera-edit-sidebar">
+          <section class="form-card form-card-compact">
+            <h2 class="form-card-title">Quick Actions</h2>
+            <div class="action-list">
+              <form method="post" action="/admin/cameras/${c.id}/sync-time" class="action-form">
+                ${csrfField(req)}
+                <button type="submit" class="action-btn">
+                  <span class="action-icon">&#x1F551;</span>
+                  <span class="action-text">
+                    <strong>Sync camera time</strong>
+                    <small>Set camera clock to server time</small>
+                  </span>
+                </button>
+              </form>
+              <a href="/admin/cameras/${c.id}/info" class="action-btn action-link">
+                <span class="action-icon">&#x1F4BB;</span>
+                <span class="action-text">
+                  <strong>System info</strong>
+                  <small>View camera details</small>
+                </span>
+              </a>
+              <a href="/admin/cameras/${c.id}/settings" class="action-btn action-link">
+                <span class="action-icon">&#x1F3A5;</span>
+                <span class="action-text">
+                  <strong>Camera settings</strong>
+                  <small>Resolution, bitrate, etc.</small>
+                </span>
+              </a>
+              <a href="/admin/cameras/${c.id}/debug" class="action-btn action-link">
+                <span class="action-icon">&#x1F41B;</span>
+                <span class="action-text">
+                  <strong>Debug</strong>
+                  <small>View ONVIF protocol log</small>
+                </span>
+              </a>
+            </div>
+          </section>
+          <section class="form-card form-card-compact">
+            <h2 class="form-card-title">Scheduled Time Sync</h2>
+            <div class="form-field">
+              <label class="checkbox-label">
+                <input type="checkbox" name="time_sync_enabled" value="1" ${c.time_sync_enabled ? 'checked' : ''}>
+                Enable automatic time sync
+              </label>
+              <span class="form-field-hint">Sync camera clock to server time on a schedule</span>
+            </div>
+            <div class="form-field form-field-small">
+              <label for="time-sync-interval">Sync every (hours)</label>
+              <input type="number" id="time-sync-interval" name="time_sync_interval_hours" value="${c.time_sync_interval_hours || 24}" min="1" max="168" placeholder="24">
+            </div>
+          </section>
+          <section class="form-card form-card-compact form-card-danger">
+            <h2 class="form-card-title">Danger Zone</h2>
+            <div class="action-list">
+              <form method="post" action="/admin/cameras/${c.id}/reboot" data-confirm="Reboot camera &quot;${escapeHtml(c.display_name)}&quot;? The stream will be interrupted.">
+                ${csrfField(req)}
+                <button type="submit" class="action-btn action-btn-danger">
+                  <span class="action-icon">&#x1F504;</span>
+                  <span class="action-text">
+                    <strong>Reboot camera</strong>
+                    <small>Restart the device</small>
+                  </span>
+                </button>
+              </form>
+              <form method="post" action="/admin/cameras/${c.id}/delete" data-confirm="Delete camera &quot;${escapeHtml(c.display_name)}&quot;? This cannot be undone.">
+                ${csrfField(req)}
+                <button type="submit" class="btn btn-danger btn-block">Delete this camera</button>
+              </form>
+            </div>
+          </section>
+        </aside>
       </div>
-      ${ffmpegFormSection(ffmpegOpts)}
-      <div class="form-actions">
+      <div class="form-actions form-actions-sticky">
         <button type="submit" class="btn btn-primary">Save changes</button>
         <a href="/admin" class="btn btn-ghost">Cancel</a>
       </div>
@@ -588,13 +758,32 @@ router.post('/cameras/:id', requireLogin, verifyCsrf, auditLog('camera.update'),
   const id = Number(req.params.id);
   const c = db.getCamera(id);
   if (!c) return res.redirect('/admin');
-  const { display_name, rtsp_host, rtsp_port, rtsp_path, rtsp_username, rtsp_password } = req.body || {};
+  const { display_name, rtsp_host, rtsp_port, rtsp_path, rtsp_username, rtsp_password, onvif_port, onvif_username, onvif_password, time_sync_enabled, time_sync_interval_hours } = req.body || {};
   if (!display_name || !rtsp_host) return res.redirect(`/admin/cameras/${id}/edit`);
   const port = parseInt(rtsp_port) || 554;
+  const onvifPort = parseInt(onvif_port) || 8899;
   const password = rtsp_password || c.rtsp_password;
+  const onvifPw = onvif_password || c.onvif_password;
   const ffmpegOpts = { ...DEFAULT_FFMPEG_OPTIONS, ...ffmpegOptionsFromBody(req.body || {}) };
+  const timeSyncEnabled = time_sync_enabled === '1';
+  const timeSyncInterval = Math.min(168, Math.max(1, parseInt(time_sync_interval_hours) || 24));
   try {
-    db.updateCamera(id, display_name.trim(), rtsp_host.trim(), port, (rtsp_path || '').trim(), (rtsp_username || '').trim(), (password || '').trim(), JSON.stringify(ffmpegOpts));
+    db.updateCamera(
+      id,
+      display_name.trim(),
+      rtsp_host.trim(),
+      port,
+      (rtsp_path || '').trim(),
+      (rtsp_username || '').trim(),
+      (password || '').trim(),
+      JSON.stringify(ffmpegOpts),
+      onvifPort,
+      (onvif_username || '').trim(),
+      (onvifPw || '').trim(),
+      timeSyncEnabled,
+      timeSyncInterval
+    );
+    timeSyncScheduler.restartScheduler(id);
     await streamManager.stopStream(id);
     const updated = db.getCamera(id);
     await streamManager.startStream(id, updated);
@@ -612,6 +801,299 @@ router.post('/cameras/:id/delete', requireLogin, verifyCsrf, auditLog('camera.de
   }
   res.redirect('/admin');
 });
+
+router.post('/cameras/:id/sync-time', requireLogin, verifyCsrf, auditLog('camera.sync_time'), async (req, res) => {
+  const id = Number(req.params.id);
+  const c = db.getCamera(id);
+  if (!c) return res.redirect('/admin');
+  try {
+    const host = c.rtsp_host;
+    const onvifCreds = db.getOnvifCredentials(c);
+    const cam = await onvif.createCam(host, onvifCreds.port, onvifCreds.username, onvifCreds.password);
+    const beforeTime = await onvif.getSystemDateAndTime(cam);
+    const serverTime = new Date();
+    await onvif.setSystemDateAndTime(cam, serverTime);
+    const fmt = (d) => d ? d.toLocaleString('sv-SE') : 'unknown';
+    const msg = `Time synced: ${fmt(beforeTime)} → ${fmt(serverTime)}`;
+    res.redirect(`/admin/cameras/${id}/edit?msg=` + encodeURIComponent(msg));
+  } catch (err) {
+    console.error('Time sync failed:', err.message);
+    res.redirect(`/admin/cameras/${id}/edit?msg=` + encodeURIComponent('Time sync failed: ' + err.message));
+  }
+});
+
+router.post('/cameras/:id/reboot', requireLogin, verifyCsrf, auditLog('camera.reboot'), async (req, res) => {
+  const id = Number(req.params.id);
+  const c = db.getCamera(id);
+  if (!c) return res.redirect('/admin');
+  try {
+    const host = c.rtsp_host;
+    const onvifCreds = db.getOnvifCredentials(c);
+    const cam = await onvif.createCam(host, onvifCreds.port, onvifCreds.username, onvifCreds.password);
+    await onvif.reboot(cam);
+    await streamManager.stopStream(id);
+    res.redirect(`/admin/cameras/${id}/edit?msg=` + encodeURIComponent('Reboot command sent. Camera will restart shortly.'));
+  } catch (err) {
+    console.error('Reboot failed:', err.message);
+    res.redirect(`/admin/cameras/${id}/edit?msg=` + encodeURIComponent('Reboot failed: ' + err.message));
+  }
+});
+
+router.get('/cameras/:id/info', requireLogin, async (req, res) => {
+  const id = Number(req.params.id);
+  const c = db.getCamera(id);
+  if (!c) return res.redirect('/admin');
+  let info = null;
+  let error = null;
+  try {
+    const host = c.rtsp_host;
+    const onvifCreds = db.getOnvifCredentials(c);
+    const cam = await onvif.createCam(host, onvifCreds.port, onvifCreds.username, onvifCreds.password);
+    const [general, cameraTime, encode] = await Promise.all([
+      onvif.getDeviceInformation(cam).catch(() => null),
+      onvif.getSystemDateAndTime(cam).catch(() => null),
+      onvif.getVideoEncoderConfig(cam).catch(() => null),
+    ]);
+    info = { general, cameraTime, encode };
+  } catch (err) {
+    error = err.message;
+  }
+  res.send(layout('Camera Info', nav('cameras'), `
+    ${breadcrumb({ label: 'Cameras', href: '/admin' }, { label: escapeHtml(c.display_name), href: `/admin/cameras/${id}/edit` }, { label: 'System Info' })}
+    <h1>System Info: ${escapeHtml(c.display_name)}</h1>
+    ${error ? `<div class="admin-msg">${escapeHtml(error)}</div>` : ''}
+    ${info ? `
+      <div class="info-grid">
+        ${info.general ? `
+        <section class="form-card">
+          <h2 class="form-card-title">General</h2>
+          <table class="info-table">
+            ${Object.entries(info.general).map(([key, value]) => `
+              <tr><th>${escapeHtml(key)}</th><td>${formatInfoValue(value)}</td></tr>
+            `).join('')}
+          </table>
+        </section>
+        ` : ''}
+        ${info.cameraTime ? `
+        <section class="form-card">
+          <h2 class="form-card-title">Camera Time</h2>
+          <table class="info-table">
+            <tr><th>Camera time</th><td>${escapeHtml(info.cameraTime.toLocaleString())}</td></tr>
+            <tr><th>Server time</th><td>${escapeHtml(new Date().toLocaleString())}</td></tr>
+            <tr><th>Drift</th><td>${formatDrift(info.cameraTime)}</td></tr>
+          </table>
+        </section>
+        ` : ''}
+        ${info.encode ? `
+        <section class="form-card">
+          <h2 class="form-card-title">Encoding</h2>
+          <table class="info-table">
+            ${Object.entries(info.encode).map(([key, value]) => `
+              <tr><th>${escapeHtml(key)}</th><td>${formatInfoValue(value)}</td></tr>
+            `).join('')}
+          </table>
+        </section>
+        ` : ''}
+      </div>
+    ` : ''}
+    <div class="form-actions">
+      <a href="/admin/cameras/${id}/edit" class="btn btn-ghost">Back to camera</a>
+    </div>
+  `));
+});
+
+router.get('/cameras/:id/settings', requireLogin, async (req, res) => {
+  const id = Number(req.params.id);
+  const c = db.getCamera(id);
+  if (!c) return res.redirect('/admin');
+  let cameraConfig = null;
+  let encodeConfig = null;
+  let error = null;
+  try {
+    const host = c.rtsp_host;
+    const onvifCreds = db.getOnvifCredentials(c);
+    const cam = await onvif.createCam(host, onvifCreds.port, onvifCreds.username, onvifCreds.password);
+    const [imaging, encode] = await Promise.all([
+      onvif.getImagingSettings(cam).catch(() => null),
+      onvif.getVideoEncoderConfig(cam).catch(() => null),
+    ]);
+    cameraConfig = imaging;
+    encodeConfig = encode;
+  } catch (err) {
+    error = err.message;
+  }
+  res.send(layout('Camera Settings', nav('cameras'), `
+    ${breadcrumb({ label: 'Cameras', href: '/admin' }, { label: escapeHtml(c.display_name), href: `/admin/cameras/${id}/edit` }, { label: 'Settings' })}
+    <h1>Camera Settings: ${escapeHtml(c.display_name)}</h1>
+    ${error ? `<div class="admin-msg">${escapeHtml(error)}</div>` : ''}
+    ${req.query.msg ? `<div class="admin-msg admin-msg-ok">${escapeHtml(req.query.msg)}</div>` : ''}
+    <form method="post" action="/admin/cameras/${id}/settings" class="admin-form">
+      ${csrfField(req)}
+      ${cameraConfig ? `
+      <section class="form-card">
+        <h2 class="form-card-title">Video Settings</h2>
+        <div class="form-grid-2">
+          <div class="form-field">
+            <label for="cam-brightness">Brightness</label>
+            <input type="number" id="cam-brightness" name="brightness" value="${cameraConfig.Brightness ?? ''}" min="0" max="100">
+          </div>
+          <div class="form-field">
+            <label for="cam-contrast">Contrast</label>
+            <input type="number" id="cam-contrast" name="contrast" value="${cameraConfig.Contrast ?? ''}" min="0" max="100">
+          </div>
+          <div class="form-field">
+            <label for="cam-saturation">Saturation</label>
+            <input type="number" id="cam-saturation" name="saturation" value="${cameraConfig.Saturation ?? ''}" min="0" max="100">
+          </div>
+          <div class="form-field">
+            <label for="cam-sharpness">Sharpness</label>
+            <input type="number" id="cam-sharpness" name="sharpness" value="${cameraConfig.Sharpness ?? ''}" min="0" max="100">
+          </div>
+        </div>
+      </section>
+      ` : ''}
+      ${encodeConfig ? `
+      <section class="form-card">
+        <h2 class="form-card-title">Encoding Settings</h2>
+        <div class="form-grid-2">
+          <div class="form-field">
+            <label for="enc-width">Width</label>
+            <input type="number" id="enc-width" name="video_width" value="${encodeConfig.Video?.Width ?? ''}" min="1">
+          </div>
+          <div class="form-field">
+            <label for="enc-height">Height</label>
+            <input type="number" id="enc-height" name="video_height" value="${encodeConfig.Video?.Height ?? ''}" min="1">
+          </div>
+          <div class="form-field">
+            <label for="enc-fps">FPS</label>
+            <input type="number" id="enc-fps" name="video_fps" value="${encodeConfig.Video?.FPS ?? ''}" min="1" max="60">
+          </div>
+          <div class="form-field">
+            <label for="enc-bitrate">Bitrate (kbps)</label>
+            <input type="number" id="enc-bitrate" name="video_bitrate" value="${encodeConfig.Video?.BitRate ?? ''}" min="1">
+          </div>
+          <div class="form-field">
+            <label for="enc-quality">Quality</label>
+            <input type="number" id="enc-quality" name="video_quality" value="${encodeConfig.Video?.Quality ?? ''}" min="1" max="4">
+          </div>
+          <div class="form-field">
+            <label for="enc-iframe">I-Frame Interval</label>
+            <input type="number" id="enc-iframe" name="video_iframe" value="${encodeConfig.Video?.GOP ?? ''}" min="1" placeholder="100">
+          </div>
+        </div>
+      </section>
+      ` : ''}
+      <div class="form-actions">
+        <button type="submit" class="btn btn-primary">Save settings</button>
+        <a href="/admin/cameras/${id}/edit" class="btn btn-ghost">Cancel</a>
+      </div>
+    </form>
+  `));
+});
+
+router.post('/cameras/:id/settings', requireLogin, verifyCsrf, auditLog('camera.settings'), async (req, res) => {
+  const id = Number(req.params.id);
+  const c = db.getCamera(id);
+  if (!c) return res.redirect('/admin');
+  try {
+    const host = c.rtsp_host;
+    const onvifCreds = db.getOnvifCredentials(c);
+    const cam = await onvif.createCam(host, onvifCreds.port, onvifCreds.username, onvifCreds.password);
+    const body = req.body || {};
+    
+    if (body.brightness !== undefined || body.contrast !== undefined || body.saturation !== undefined || body.sharpness !== undefined) {
+      const imagingUpdates = {};
+      if (body.brightness !== undefined && body.brightness !== '') imagingUpdates.Brightness = parseFloat(body.brightness);
+      if (body.contrast !== undefined && body.contrast !== '') imagingUpdates.Contrast = parseFloat(body.contrast);
+      if (body.saturation !== undefined && body.saturation !== '') imagingUpdates.Saturation = parseFloat(body.saturation);
+      if (body.sharpness !== undefined && body.sharpness !== '') imagingUpdates.Sharpness = parseFloat(body.sharpness);
+      if (Object.keys(imagingUpdates).length > 0) {
+        await onvif.setImagingSettings(cam, imagingUpdates).catch(() => {});
+      }
+    }
+    
+    if (body.video_width !== undefined || body.video_height !== undefined || body.video_fps !== undefined || body.video_bitrate !== undefined) {
+      const videoUpdates = {};
+      if (body.video_width !== undefined && body.video_width !== '') videoUpdates.Width = parseInt(body.video_width);
+      if (body.video_height !== undefined && body.video_height !== '') videoUpdates.Height = parseInt(body.video_height);
+      if (body.video_fps !== undefined && body.video_fps !== '') videoUpdates.FPS = parseInt(body.video_fps);
+      if (body.video_bitrate !== undefined && body.video_bitrate !== '') videoUpdates.BitRate = parseInt(body.video_bitrate);
+      if (body.video_quality !== undefined && body.video_quality !== '') videoUpdates.Quality = parseInt(body.video_quality);
+      if (body.video_iframe !== undefined && body.video_iframe !== '') videoUpdates.GOP = parseInt(body.video_iframe);
+      if (Object.keys(videoUpdates).length > 0) {
+        await onvif.setVideoEncoderConfig(cam, videoUpdates).catch(() => {});
+      }
+    }
+    
+    res.redirect(`/admin/cameras/${id}/settings?msg=` + encodeURIComponent('Settings saved'));
+  } catch (err) {
+    console.error('Settings save failed:', err.message);
+    res.redirect(`/admin/cameras/${id}/settings?msg=` + encodeURIComponent('Failed to save settings: ' + err.message));
+  }
+});
+
+router.get('/cameras/:id/debug', requireLogin, async (req, res) => {
+  const id = Number(req.params.id);
+  const c = db.getCamera(id);
+  if (!c) return res.redirect('/admin');
+  let results = {};
+  let error = null;
+  const cmd = req.query.cmd || 'info';
+  try {
+    const host = c.rtsp_host;
+    const onvifCreds = db.getOnvifCredentials(c);
+    const cam = await onvif.createCam(host, onvifCreds.port, onvifCreds.username, onvifCreds.password);
+    
+    if (cmd === 'time') {
+      results.time = await onvif.getSystemDateAndTime(cam);
+    } else if (cmd === 'config') {
+      results.imaging = await onvif.getImagingSettings(cam);
+      results.encoder = await onvif.getVideoEncoderConfig(cam);
+    } else {
+      results.info = await onvif.getDeviceInformation(cam);
+      results.time = await onvif.getSystemDateAndTime(cam);
+    }
+  } catch (err) {
+    error = err.message;
+  }
+  res.send(layout('ONVIF Debug', nav('cameras'), `
+    ${breadcrumb({ label: 'Cameras', href: '/admin' }, { label: escapeHtml(c.display_name), href: `/admin/cameras/${id}/edit` }, { label: 'Debug' })}
+    <h1>ONVIF Debug: ${escapeHtml(c.display_name)}</h1>
+    ${error ? `<div class="admin-msg">${escapeHtml(error)}</div>` : ''}
+    <div class="debug-commands">
+      <a href="/admin/cameras/${id}/debug?cmd=info" class="btn btn-small ${cmd === 'info' ? 'btn-primary' : 'btn-ghost'}">System Info</a>
+      <a href="/admin/cameras/${id}/debug?cmd=time" class="btn btn-small ${cmd === 'time' ? 'btn-primary' : 'btn-ghost'}">Time Query</a>
+      <a href="/admin/cameras/${id}/debug?cmd=config" class="btn btn-small ${cmd === 'config' ? 'btn-primary' : 'btn-ghost'}">All Configs</a>
+    </div>
+    <div class="debug-log-wrap">
+      <h2>Results</h2>
+      ${Object.keys(results).length ? `
+        <pre class="debug-log-full">${escapeHtml(JSON.stringify(results, null, 2))}</pre>
+      ` : '<p class="info-muted">No results</p>'}
+    </div>
+    <div class="form-actions">
+      <a href="/admin/cameras/${id}/edit" class="btn btn-ghost">Back to camera</a>
+    </div>
+  `));
+});
+
+function formatInfoValue(value) {
+  if (value == null) return '<span class="info-muted">—</span>';
+  if (typeof value === 'object') {
+    return `<pre class="info-json">${escapeHtml(JSON.stringify(value, null, 2))}</pre>`;
+  }
+  return escapeHtml(String(value));
+}
+
+function formatDrift(cameraTime) {
+  const diff = new Date() - cameraTime;
+  const seconds = Math.round(diff / 1000);
+  const abs = Math.abs(seconds);
+  const sign = seconds >= 0 ? '+' : '-';
+  if (abs < 60) return `${sign}${abs}s`;
+  if (abs < 3600) return `${sign}${Math.floor(abs / 60)}m ${abs % 60}s`;
+  return `${sign}${Math.floor(abs / 3600)}h ${Math.floor((abs % 3600) / 60)}m`;
+}
 
 // --- Users ---
 

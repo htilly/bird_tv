@@ -38,6 +38,9 @@ function initSchema(db) {
       rtsp_path TEXT NOT NULL DEFAULT '',
       rtsp_username TEXT NOT NULL DEFAULT '',
       rtsp_password TEXT NOT NULL DEFAULT '',
+      onvif_port INTEGER NOT NULL DEFAULT 8899,
+      onvif_username TEXT NOT NULL DEFAULT '',
+      onvif_password TEXT NOT NULL DEFAULT '',
       ffmpeg_options TEXT DEFAULT '{}',
       created_at TEXT DEFAULT (datetime('now')),
       updated_at TEXT DEFAULT (datetime('now'))

@@ -24,7 +24,8 @@ function getFpsModeSupported() {
 
 const hlsDir = path.join(__dirname, 'hls');
 const processes = new Map();
-const stopping = new Set(); // tracks intentional stops to prevent auto-restart
+const stopping = new Set();
+const motionEnabled = new Set();
 const MAX_LOG_LINES = 200;
 const logs = new Map(); // cameraId -> string[]
 
@@ -100,12 +101,10 @@ function buildFfmpegArgs(rtspUrl, outBase, options, enableMotionFrames = false) 
   pushOpt(args, '-fflags', o.fflags);
   if (o.avoid_negative_ts) pushOpt(args, '-avoid_negative_ts', o.avoid_negative_ts);
   if (o.input_fps) pushOpt(args, '-r', o.input_fps);
-  pushOpt(args, '-i', rtspUrl);
-  pushOpt(args, '-reconnect', o.reconnect);
-  pushOpt(args, '-reconnect_streamed', o.reconnect_streamed);
-  pushOpt(args, '-reconnect_delay_max', o.reconnect_delay_max);
+  pushOpt(args, '-stimeout', '5000000');
   pushOpt(args, '-max_delay', o.max_delay);
   pushOpt(args, '-flags', o.flags);
+  pushOpt(args, '-i', rtspUrl);
 
   const extraInput = parseExtraArgs(o.extra_input_args);
   for (let i = 0; i < extraInput.length; i++) args.push(extraInput[i]);
@@ -172,16 +171,20 @@ async function startStream(cameraId, camera, enableMotionFrames = false) {
     return null;
   }
 
-  // Wait for any existing process to fully exit before spawning a new one.
-  // This prevents multiple ffmpeg instances writing to the same HLS files.
+  if (enableMotionFrames) {
+    motionEnabled.add(cameraId);
+  } else if (!motionEnabled.has(cameraId)) {
+  }
+  const shouldEnableMotion = motionEnabled.has(cameraId);
+
   await stopStream(cameraId);
   stopping.delete(cameraId);
   ensureHlsDir();
   const outBase = path.join(hlsDir, `cam-${cameraId}`);
   const options = typeof camera === 'string' ? {} : parseFfmpegOptions(camera);
-  const args = buildFfmpegArgs(rtspUrl, outBase, options, enableMotionFrames);
+  const args = buildFfmpegArgs(rtspUrl, outBase, options, shouldEnableMotion);
   const child = spawn('ffmpeg', args, {
-    stdio: ['ignore', enableMotionFrames ? 'pipe' : 'ignore', 'pipe'],
+    stdio: ['ignore', shouldEnableMotion ? 'pipe' : 'ignore', 'pipe'],
     detached: false,
   });
   if (!logs.has(cameraId)) logs.set(cameraId, []);
@@ -190,10 +193,9 @@ async function startStream(cameraId, camera, enableMotionFrames = false) {
   child.stderr.on('data', (chunk) => {
     stderrBuf += chunk.toString();
     const lines = stderrBuf.split('\n');
-    stderrBuf = lines.pop(); // keep incomplete line in buffer
+    stderrBuf = lines.pop();
     for (const line of lines) {
       if (!line.trim()) continue;
-      // Filter high-volume noise lines
       if (line.includes('deprecated pixel format used')) continue;
       if (line.includes('Non-monotonous DTS')) continue;
       camLog.push(line);
@@ -207,13 +209,15 @@ async function startStream(cameraId, camera, enableMotionFrames = false) {
     const wasIntentionalStop = stopping.has(cameraId);
     processes.delete(cameraId);
     stopping.delete(cameraId);
-    // Only auto-restart on unexpected failure (not intentional stop, not SIGTERM from shutdown)
-    if (wasIntentionalStop) return;
-    if (signal === 'SIGTERM') return; // container/process shutting down, don't restart
-    if (code === 0 && code !== null) return; // clean exit
+    if (wasIntentionalStop) {
+      motionEnabled.delete(cameraId);
+      return;
+    }
+    if (signal === 'SIGTERM') return;
+    console.log(`[stream] Camera ${cameraId} ffmpeg exited code=${code} signal=${signal}, restarting in 5s...`);
     setTimeout(async () => {
       const cam = db.getCamera(cameraId);
-      if (cam) await startStream(cameraId, cam);
+      if (cam) await startStream(cameraId, cam, shouldEnableMotion);
     }, 5000);
   });
   processes.set(cameraId, child);
@@ -242,16 +246,21 @@ async function stopStream(cameraId) {
 
   return new Promise((resolve) => {
     stopping.add(cameraId); // mark as intentional stop
-    processes.delete(cameraId);
 
     // (#20) Safety timeout — resolve even if ffmpeg ignores signals
+    const maybeDeleteProcess = () => {
+      // Only delete if this camera still points to the same child.
+      if (processes.get(cameraId) === child) processes.delete(cameraId);
+    };
     const safetyTimer = setTimeout(() => {
+      maybeDeleteProcess();
       resolve();
     }, 12_000);
 
     // Resolve as soon as the process exits
     child.once('exit', () => {
       clearTimeout(safetyTimer);
+      maybeDeleteProcess();
       resolve();
     });
 
@@ -267,9 +276,14 @@ async function stopAll() {
   await Promise.all([...processes.keys()].map((id) => stopStream(id)));
 }
 
-async function startAll() {
+async function startAll({ motionCameraId = null } = {}) {
   const cameras = db.listCameras();
-  for (const c of cameras) await startStream(c.id, c);
+  for (const c of cameras) {
+    // Enable the rawvideo stdout pipe only for the motion camera to avoid
+    // having two separate ffmpeg processes at steady state.
+    const enableMotionFrames = motionCameraId != null && c.id === motionCameraId;
+    await startStream(c.id, c, enableMotionFrames);
+  }
 }
 
 function isRunning(cameraId) {

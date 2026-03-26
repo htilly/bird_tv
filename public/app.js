@@ -814,7 +814,7 @@
 
   updateLastVisit();
   fetchStats();
-  loadRecentClips();
+  adminMePromise.then(() => loadRecentClips());
   setInterval(fetchStats, STATS_POLL_INTERVAL);
 
   // --- Recordings panel ---
@@ -982,6 +982,18 @@
       if (durStr) btn.appendChild(metaEl);
       btn.appendChild(starEl);
 
+      if (isAdmin) {
+        const delEl = document.createElement('span');
+        delEl.className = 'rec-chip-delete';
+        delEl.textContent = '×';
+        delEl.title = 'Delete clip';
+        delEl.addEventListener('click', (e) => {
+          e.stopPropagation();
+          deleteClip(c.id, btn);
+        });
+        btn.appendChild(delEl);
+      }
+
       btn.addEventListener('click', () => {
         if (!c.filename) return;
         const timestamp = start ? formatDateTimeFull(start) : 'Recording';
@@ -1013,6 +1025,18 @@
           starEl.classList.add('rec-chip-star-on');
         } else {
           starEl.classList.remove('rec-chip-star-on');
+        }
+      })
+      .catch(() => {});
+  }
+
+  function deleteClip(id, chipEl) {
+    if (!confirm('Delete this clip?')) return;
+    fetch(`/api/motion-clips/${id}`, { method: 'DELETE' })
+      .then((r) => r.json())
+      .then((data) => {
+        if (data && data.success) {
+          chipEl.remove();
         }
       })
       .catch(() => {});

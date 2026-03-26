@@ -25,10 +25,16 @@ async function startMotionDetector() {
   const camera = cameras[0];
   const cameraId = camera.id;
 
-  // Restart the stream with motion frame output enabled
-  // await ensures old process is fully dead before new one starts
-  console.log(`[motion-manager] Starting camera ${cameraId} with motion frame output`);
-  const ffmpegProc = await streamManager.startStream(cameraId, camera, true);
+  // Reuse the already-started ffmpeg process if it was started with raw
+  // frame output (pipe:1). Otherwise, restart with motion frames enabled.
+  let ffmpegProc = streamManager.getProcess(cameraId);
+  if (!ffmpegProc || !ffmpegProc.stdout) {
+    console.log(`[motion-manager] Starting camera ${cameraId} with motion frame output`);
+    // await ensures old process is fully dead before new one starts
+    ffmpegProc = await streamManager.startStream(cameraId, camera, true);
+  } else {
+    console.log(`[motion-manager] Reusing existing ffmpeg stdout for camera ${cameraId}`);
+  }
 
   if (!ffmpegProc || !ffmpegProc.stdout) {
     console.error('[motion-manager] Failed to start ffmpeg with motion frames');
@@ -65,10 +71,9 @@ async function startMotionDetector() {
     console.log(`[motion-manager] Motion process exited code=${code} signal=${signal}`);
     motionProcess = null;
 
-    // Auto-restart if not intentional shutdown
-    if (!isShuttingDown && code !== 0) {
-      console.log('[motion-manager] Restarting motion detector in 5s...');
-      setTimeout(startMotionDetector, 5000);
+    if (!isShuttingDown) {
+      console.log('[motion-manager] Restarting motion detector in 7s...');
+      setTimeout(startMotionDetector, 7000);
     }
   });
 

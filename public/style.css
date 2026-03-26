@@ -1185,6 +1185,15 @@ body {
 .rec-chip-star-on {
   color: #f6c90e;
 }
+.rec-chip-delete {
+  font-size: 0.9rem;
+  color: rgba(0,0,0,0.3);
+  margin-left: 0.15rem;
+  cursor: pointer;
+}
+.rec-chip-delete:hover {
+  color: #e74c3c;
+}
 
 .rec-chip-state {
   position: absolute;

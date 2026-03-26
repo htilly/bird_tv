@@ -21,6 +21,7 @@ const { spawn } = require('child_process');
 const db = require('./db');
 const streamManager = require('./streamManager');
 const motionManager = require('./motionManager');
+const timeSyncScheduler = require('./timeSyncScheduler');
 const adminRoutes = require('./routes/admin');
 const recordingsRoutes = require('./routes/recordings');
 const { requestIdMiddleware } = require('./middleware/requestId');
@@ -87,18 +88,27 @@ if (!VAPID_PUBLIC_KEY) {
     console.log('Generated and persisted VAPID keys to database.');
   }
 }
-streamManager.startAll().then(() => {
+// Motion detector reads raw frames from ffmpeg stdout for the motion camera.
+// To avoid a second ffmpeg process, start the motion camera with both HLS + raw
+// outputs from boot.
+const enableMotion = db.getSetting('enable_motion_detector') === 'true' ||
+                     process.env.ENABLE_MOTION_DETECTOR === 'true';
+const camerasForStartup = db.listCameras();
+const motionCameraId = enableMotion && camerasForStartup.length ? camerasForStartup[0].id : null;
+
+streamManager.startAll({ motionCameraId }).then(() => {
   console.log('All camera streams started.');
 
   // Start motion detector if enabled (after streams are fully up)
-  const enableMotion = db.getSetting('enable_motion_detector') === 'true' ||
-                       process.env.ENABLE_MOTION_DETECTOR === 'true';
   if (enableMotion) {
     console.log('[motion] Motion detector enabled — starting in 3s');
     setTimeout(() => motionManager.startMotionDetector(), 3000);
   } else {
     console.log('[motion] Motion detector disabled (set enable_motion_detector=true in DB settings to enable)');
   }
+
+  // Initialize time sync scheduler
+  timeSyncScheduler.initializeFromDb();
 }).catch((err) => {
   console.error('Error starting camera streams:', err);
 });
@@ -434,6 +444,25 @@ app.post('/api/motion-clips/:id/star', (req, res) => {
   if (!incident) return res.status(404).json({ error: 'Not found' });
   const updated = db.setMotionIncidentStar(id, !incident.starred);
   res.json({ id: updated.id, starred: !!updated.starred });
+});
+
+// Public: delete a motion clip (admin only)
+app.delete('/api/motion-clips/:id', (req, res) => {
+  if (!(req.session && req.session.userId)) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
+  const incident = db.getMotionIncident(id);
+  if (!incident) return res.status(404).json({ error: 'Not found' });
+  if (incident.file_path) {
+    const base = path.basename(incident.file_path);
+    if (base === incident.file_path || !base.includes('..')) {
+      try { fs.unlinkSync(path.join(motionClipsDir, base)); } catch (_) {}
+    }
+  }
+  db.deleteMotionIncident(id);
+  res.json({ success: true, id });
 });
 
 // Public: serve motion clip MP4 files by filename (path-traversal safe)
@@ -1170,6 +1199,7 @@ async function shutdown(signal) {
   console.log(`\n${signal} received. Shutting down gracefully...`);
   clearInterval(wsPingInterval);
   motionManager.stopMotionDetector();
+  timeSyncScheduler.stopAll();
   await streamManager.stopAll();
 
   // Stop any in-progress motion incident recordings (best-effort).
