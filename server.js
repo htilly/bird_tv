@@ -446,6 +446,25 @@ app.post('/api/motion-clips/:id/star', (req, res) => {
   res.json({ id: updated.id, starred: !!updated.starred });
 });
 
+// Public: delete a motion clip (admin only)
+app.delete('/api/motion-clips/:id', (req, res) => {
+  if (!(req.session && req.session.userId)) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
+  const incident = db.getMotionIncident(id);
+  if (!incident) return res.status(404).json({ error: 'Not found' });
+  if (incident.file_path) {
+    const base = path.basename(incident.file_path);
+    if (base === incident.file_path || !base.includes('..')) {
+      try { fs.unlinkSync(path.join(motionClipsDir, base)); } catch (_) {}
+    }
+  }
+  db.deleteMotionIncident(id);
+  res.json({ success: true, id });
+});
+
 // Public: serve motion clip MP4 files by filename (path-traversal safe)
 app.get('/clips/:filename', (req, res) => {
   const filename = path.basename(req.params.filename); // strips any ../

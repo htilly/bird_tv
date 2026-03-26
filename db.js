@@ -650,7 +650,7 @@ function listRecentMotionIncidents(limit = 30) {
       c.display_name as camera_name
     FROM motion_incidents mi
     LEFT JOIN cameras c ON c.id = mi.camera_id
-    ORDER BY mi.started_at DESC
+    ORDER BY mi.starred DESC, mi.started_at DESC
     LIMIT ?
   `).all(limit);
 }
