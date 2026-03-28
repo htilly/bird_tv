@@ -607,6 +607,7 @@ const motionBrowserClients = new Set();
 const activeMotionIncidents = new Map();
 let motionRuntimeConfig = {
   cooldown_sec: parseInt(process.env.MOTION_COOLDOWN_SEC, 10) || 30,
+  recording_cooldown_sec: parseInt(process.env.MOTION_RECORDING_COOLDOWN_SEC, 10) || 3,
 };
 
 function formatIsoNow() {
@@ -860,6 +861,9 @@ motionWss.on('connection', (ws, req) => {
           if (msg.cooldown_sec !== undefined) {
             motionRuntimeConfig.cooldown_sec = safeNumber(msg.cooldown_sec, motionRuntimeConfig.cooldown_sec);
           }
+          if (msg.recording_cooldown_sec !== undefined) {
+            motionRuntimeConfig.recording_cooldown_sec = safeNumber(msg.recording_cooldown_sec, motionRuntimeConfig.recording_cooldown_sec);
+          }
         } else if (msg.type === 'motion') {
           const cameraId = Number(msg.camera_id);
           const detected = msg.detected === true;
@@ -869,7 +873,7 @@ motionWss.on('connection', (ws, req) => {
           } else if (detected && boxesOk) {
             const startedAtIso = msg.timestamp || formatIsoNow();
             const state = activeMotionIncidents.get(cameraId);
-            const cooldownMs = safeNumber(motionRuntimeConfig.cooldown_sec, 30) * 1000;
+            const cooldownMs = safeNumber(motionRuntimeConfig.recording_cooldown_sec, 3) * 1000;
 
             if (!state) {
               const s = startMotionIncident(cameraId, startedAtIso);
