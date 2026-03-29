@@ -858,6 +858,30 @@ router.get('/cameras/:id/edit', requireLogin, (req, res) => {
               <input type="number" id="time-sync-interval" name="time_sync_interval_hours" value="${c.time_sync_interval_hours || 24}" min="1" max="168" placeholder="24">
             </div>
           </section>
+          <section class="form-card form-card-compact">
+            <h2 class="form-card-title">Motion Detection</h2>
+            <p class="form-card-desc">Adjust sensitivity for this camera. Leave blank to use defaults.</p>
+            <div class="form-field form-field-small">
+              <label for="motion-min-area">Min area (pixels²)</label>
+              <input type="number" id="motion-min-area" name="motion_min_area" value="${c.motion_min_area || ''}" min="100" max="50000" placeholder="1500 (default)">
+              <span class="form-field-hint">Higher = less sensitive (ignore small movements)</span>
+            </div>
+            <div class="form-field form-field-small">
+              <label for="motion-threshold">Threshold (%)</label>
+              <input type="number" id="motion-threshold" name="motion_threshold" value="${c.motion_threshold || ''}" min="0.001" max="1" step="0.001" placeholder="0.005 (default)">
+              <span class="form-field-hint">Fraction of frame that must change (0.005 = 0.5%)</span>
+            </div>
+            <div class="form-field form-field-small">
+              <label for="motion-blur">Blur kernel</label>
+              <input type="number" id="motion-blur" name="motion_blur_kernel" value="${c.motion_blur_kernel || ''}" min="3" max="51" step="2" placeholder="21 (default)">
+              <span class="form-field-hint">Higher = more noise reduction (must be odd)</span>
+            </div>
+            <div class="form-field form-field-small">
+              <label for="motion-cooldown">Cooldown (sec)</label>
+              <input type="number" id="motion-cooldown" name="motion_cooldown_sec" value="${c.motion_cooldown_sec || ''}" min="1" max="300" placeholder="3 (default)">
+              <span class="form-field-hint">Seconds without motion before recording stops</span>
+            </div>
+          </section>
           <section class="form-card form-card-compact form-card-danger">
             <h2 class="form-card-title">Danger Zone</h2>
             <div class="action-list">
@@ -900,6 +924,15 @@ router.post('/cameras/:id', requireLogin, verifyCsrf, auditLog('camera.update'),
   const ffmpegOpts = { ...DEFAULT_FFMPEG_OPTIONS, ...ffmpegOptionsFromBody(req.body || {}) };
   const timeSyncEnabled = time_sync_enabled === '1';
   const timeSyncInterval = Math.min(168, Math.max(1, parseInt(time_sync_interval_hours) || 24));
+  
+  const { motion_min_area, motion_threshold, motion_blur_kernel, motion_cooldown_sec } = req.body || {};
+  const motionSettings = {
+    min_area: motion_min_area ? Math.max(100, Math.min(50000, parseInt(motion_min_area))) : null,
+    threshold: motion_threshold ? Math.max(0.001, Math.min(1, parseFloat(motion_threshold))) : null,
+    blur_kernel: motion_blur_kernel ? Math.max(3, Math.min(51, parseInt(motion_blur_kernel))) : null,
+    cooldown_sec: motion_cooldown_sec ? Math.max(1, Math.min(300, parseInt(motion_cooldown_sec))) : null,
+  };
+  
   try {
     db.updateCamera(
       id,
@@ -914,7 +947,8 @@ router.post('/cameras/:id', requireLogin, verifyCsrf, auditLog('camera.update'),
       (onvif_username || '').trim(),
       (onvifPw || '').trim(),
       timeSyncEnabled,
-      timeSyncInterval
+      timeSyncInterval,
+      motionSettings
     );
     timeSyncScheduler.restartScheduler(id);
     await streamManager.stopStream(id);
