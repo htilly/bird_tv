@@ -40,7 +40,7 @@ function init() {
     CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       username TEXT UNIQUE NOT NULL,
-      password_hash TEXT NOT NULL,
+      password_hash TEXT,
       created_at TEXT DEFAULT (datetime('now'))
     );
     CREATE TABLE IF NOT EXISTS cameras (
@@ -291,6 +291,23 @@ function migrate() {
       CREATE INDEX idx_webauthn_credentials_user_id ON webauthn_credentials(user_id);
     `);
   }
+
+  // Allow NULL password_hash for WebAuthn-only users
+  const userCols = d.prepare("PRAGMA table_info(users)").all();
+  const pwCol = userCols.find(c => c.name === 'password_hash');
+  if (pwCol && pwCol.notnull === 1) {
+    d.exec(`
+      CREATE TABLE users_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE NOT NULL,
+        password_hash TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+      );
+      INSERT INTO users_new SELECT id, username, password_hash, created_at FROM users;
+      DROP TABLE users;
+      ALTER TABLE users_new RENAME TO users;
+    `);
+  }
 }
 
 // --- Settings ---
@@ -396,6 +413,16 @@ function createUser(username, password) {
   const hash = bcrypt.hashSync(password, 10);
   const r = getDb().prepare('INSERT INTO users (username, password_hash) VALUES (?, ?)').run(username, hash);
   return r.lastInsertRowid;
+}
+
+function createUserWithoutPassword(username) {
+  const r = getDb().prepare('INSERT INTO users (username, password_hash) VALUES (?, NULL)').run(username);
+  return r.lastInsertRowid;
+}
+
+function hasPassword(userId) {
+  const row = stmt('hasPassword', 'SELECT password_hash FROM users WHERE id = ?').get(userId);
+  return !!(row && row.password_hash);
 }
 
 function updateUserPassword(id, newPassword) {
@@ -920,4 +947,6 @@ module.exports = {
   updateWebAuthnCredentialCounter,
   deleteWebAuthnCredential,
   countWebAuthnCredentialsByUserId,
+  createUserWithoutPassword,
+  hasPassword,
 };

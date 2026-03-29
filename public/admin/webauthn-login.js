@@ -1,9 +1,8 @@
 (function() {
-  const form = document.getElementById('webauthn-login-form');
+  const passwordlessBtn = document.getElementById('webauthn-passwordless-btn');
   const errorDiv = document.getElementById('webauthn-error');
-  const usernameInput = document.getElementById('webauthn-username');
 
-  if (!form || !window.SimpleWebAuthnBrowser) return;
+  if (!window.SimpleWebAuthnBrowser) return;
 
   const { startAuthentication } = window.SimpleWebAuthnBrowser;
 
@@ -20,27 +19,15 @@
     }
   }
 
-  form.addEventListener('submit', async (e) => {
-    e.preventDefault();
+  async function doPasswordlessLogin() {
     hideError();
-
-    const username = usernameInput.value.trim();
-    if (!username) {
-      showError('Please enter your username');
-      return;
-    }
-
-    const submitBtn = form.querySelector('button[type="submit"]');
-    const originalText = submitBtn.innerHTML;
-    submitBtn.disabled = true;
-    submitBtn.innerHTML = '<span style="opacity:0.7">Authenticating...</span>';
+    const btn = passwordlessBtn;
+    const originalText = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<span style="opacity:0.7">Authenticating...</span>';
 
     try {
-      const optionsRes = await fetch('/admin/webauthn/login-options', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username }),
-      });
+      const optionsRes = await fetch('/admin/webauthn/passwordless-options');
 
       if (!optionsRes.ok) {
         const err = await optionsRes.json().catch(() => ({}));
@@ -79,8 +66,12 @@
     } catch (err) {
       console.error('[webauthn] Login error:', err);
       showError(err.message || 'Authentication failed');
-      submitBtn.disabled = false;
-      submitBtn.innerHTML = originalText;
+      btn.disabled = false;
+      btn.innerHTML = originalText;
     }
-  });
+  }
+
+  if (passwordlessBtn) {
+    passwordlessBtn.addEventListener('click', doPasswordlessLogin);
+  }
 })();
