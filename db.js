@@ -56,7 +56,9 @@ function init() {
       device_type TEXT NOT NULL DEFAULT 'singleDevice',
       backed_up INTEGER NOT NULL DEFAULT 0,
       transports TEXT DEFAULT '[]',
+      display_name TEXT DEFAULT '',
       created_at TEXT DEFAULT (datetime('now')),
+      last_used_at TEXT,
       FOREIGN KEY (chat_user_id) REFERENCES chat_users(id) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_chat_webauthn_credentials_user_id ON chat_webauthn_credentials(chat_user_id);
@@ -104,6 +106,7 @@ function init() {
       webauthn_user_id TEXT NOT NULL,
       display_name TEXT DEFAULT '',
       created_at TEXT DEFAULT (datetime('now')),
+      last_used_at TEXT,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_webauthn_credentials_user_id ON webauthn_credentials(user_id);
@@ -350,11 +353,30 @@ function migrate() {
         device_type TEXT NOT NULL DEFAULT 'singleDevice',
         backed_up INTEGER NOT NULL DEFAULT 0,
         transports TEXT DEFAULT '[]',
+        display_name TEXT DEFAULT '',
         created_at TEXT DEFAULT (datetime('now')),
+        last_used_at TEXT,
         FOREIGN KEY (chat_user_id) REFERENCES chat_users(id) ON DELETE CASCADE
       );
       CREATE INDEX idx_chat_webauthn_credentials_user_id ON chat_webauthn_credentials(chat_user_id);
     `);
+  }
+
+  // Add last_used_at column to webauthn_credentials if missing
+  const webauthnCols = d.prepare("PRAGMA table_info(webauthn_credentials)").all().map(c => c.name);
+  if (webauthnCols.includes('id') && !webauthnCols.includes('last_used_at')) {
+    d.exec(`ALTER TABLE webauthn_credentials ADD COLUMN last_used_at TEXT`);
+  }
+
+  // Add display_name and last_used_at to chat_webauthn_credentials if missing
+  const chatWebauthnCols = d.prepare("PRAGMA table_info(chat_webauthn_credentials)").all().map(c => c.name);
+  if (chatWebauthnCols.includes('id')) {
+    if (!chatWebauthnCols.includes('display_name')) {
+      d.exec(`ALTER TABLE chat_webauthn_credentials ADD COLUMN display_name TEXT DEFAULT ''`);
+    }
+    if (!chatWebauthnCols.includes('last_used_at')) {
+      d.exec(`ALTER TABLE chat_webauthn_credentials ADD COLUMN last_used_at TEXT`);
+    }
   }
 }
 
@@ -518,7 +540,8 @@ function getWebAuthnCredentialsByUserId(userId) {
     transports: JSON.parse(row.transports || '[]'),
     webauthn_user_id: row.webauthn_user_id,
     display_name: row.display_name,
-    created_at: row.created_at
+    created_at: row.created_at,
+    last_used_at: row.last_used_at
   }));
 }
 
@@ -535,12 +558,17 @@ function getWebAuthnCredentialById(credentialId) {
     transports: JSON.parse(row.transports || '[]'),
     webauthn_user_id: row.webauthn_user_id,
     display_name: row.display_name,
-    created_at: row.created_at
+    created_at: row.created_at,
+    last_used_at: row.last_used_at
   };
 }
 
 function updateWebAuthnCredentialCounter(credentialId, newCounter) {
-  stmt('updateWebAuthnCredentialCounter', 'UPDATE webauthn_credentials SET counter = ? WHERE id = ?').run(newCounter, credentialId);
+  getDb().prepare('UPDATE webauthn_credentials SET counter = ?, last_used_at = datetime(\'now\') WHERE id = ?').run(newCounter, credentialId);
+}
+
+function updateWebAuthnCredentialDisplayName(credentialId, displayName) {
+  stmt('updateWebAuthnCredentialDisplayName', 'UPDATE webauthn_credentials SET display_name = ? WHERE id = ?').run(displayName, credentialId);
 }
 
 function deleteWebAuthnCredential(credentialId) {
@@ -568,8 +596,8 @@ function getChatUserByNickname(nickname) {
 function addChatWebAuthnCredential(credential) {
   const d = getDb();
   d.prepare(`
-    INSERT INTO chat_webauthn_credentials (id, chat_user_id, public_key, counter, device_type, backed_up, transports)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO chat_webauthn_credentials (id, chat_user_id, public_key, counter, device_type, backed_up, transports, display_name)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     credential.id,
     credential.chat_user_id,
@@ -577,7 +605,8 @@ function addChatWebAuthnCredential(credential) {
     credential.counter || 0,
     credential.device_type || 'singleDevice',
     credential.backed_up ? 1 : 0,
-    JSON.stringify(credential.transports || [])
+    JSON.stringify(credential.transports || []),
+    credential.display_name || ''
   );
 }
 
@@ -592,12 +621,18 @@ function getChatWebAuthnCredentialById(credentialId) {
     device_type: row.device_type,
     backed_up: !!row.backed_up,
     transports: JSON.parse(row.transports || '[]'),
-    created_at: row.created_at
+    display_name: row.display_name,
+    created_at: row.created_at,
+    last_used_at: row.last_used_at
   };
 }
 
 function updateChatWebAuthnCredentialCounter(credentialId, newCounter) {
-  stmt('updateChatWebAuthnCredentialCounter', 'UPDATE chat_webauthn_credentials SET counter = ? WHERE id = ?').run(newCounter, credentialId);
+  getDb().prepare('UPDATE chat_webauthn_credentials SET counter = ?, last_used_at = datetime(\'now\') WHERE id = ?').run(newCounter, credentialId);
+}
+
+function updateChatWebAuthnCredentialDisplayName(credentialId, displayName) {
+  stmt('updateChatWebAuthnCredentialDisplayName', 'UPDATE chat_webauthn_credentials SET display_name = ? WHERE id = ?').run(displayName, credentialId);
 }
 
 function listCameras() {
@@ -1042,6 +1077,7 @@ module.exports = {
   getWebAuthnCredentialsByUserId,
   getWebAuthnCredentialById,
   updateWebAuthnCredentialCounter,
+  updateWebAuthnCredentialDisplayName,
   deleteWebAuthnCredential,
   countWebAuthnCredentialsByUserId,
   createUserWithoutPassword,
@@ -1052,4 +1088,5 @@ module.exports = {
   addChatWebAuthnCredential,
   getChatWebAuthnCredentialById,
   updateChatWebAuthnCredentialCounter,
+  updateChatWebAuthnCredentialDisplayName,
 };

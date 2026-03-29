@@ -14,6 +14,9 @@
   }
 
   registerBtn.addEventListener('click', async () => {
+    const displayName = prompt('Give this security key a name (e.g. "YubiKey 5 NFC"):', '');
+    if (displayName === null) return;
+
     registerBtn.disabled = true;
     registerBtn.innerHTML = '<span style="opacity:0.7">Registering...</span>';
     showStatus('Preparing registration...');
@@ -43,7 +46,7 @@
       const verifyRes = await fetch('/admin/webauthn/register-verify', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(regResult),
+        body: JSON.stringify({ ...regResult, displayName: displayName.trim() || '' }),
       });
 
       if (!verifyRes.ok) {

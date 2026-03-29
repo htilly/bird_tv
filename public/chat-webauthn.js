@@ -62,6 +62,12 @@
     }
 
     // Register new key
+    const deviceName = prompt('Give this security key a name (optional):', '');
+    if (deviceName === null) {
+      webauthnBtn.disabled = false;
+      return;
+    }
+
     try {
       webauthnBtn.disabled = true;
       webauthnBtn.textContent = '...';
@@ -83,7 +89,7 @@
       const verifyRes = await fetch('/api/chat/webauthn/register-verify', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(regResult),
+        body: JSON.stringify({ ...regResult, displayName: deviceName.trim() || '' }),
       });
 
       if (!verifyRes.ok) {

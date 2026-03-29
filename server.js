@@ -388,6 +388,8 @@ app.post('/api/chat/webauthn/register-verify', async (req, res) => {
       chatUser = db.getChatUser(userId);
     }
 
+    const displayName = req.body.displayName || '';
+
     db.addChatWebAuthnCredential({
       id: credential.id,
       chat_user_id: chatUser.id,
@@ -396,6 +398,7 @@ app.post('/api/chat/webauthn/register-verify', async (req, res) => {
       device_type: credentialDeviceType,
       backed_up: credentialBackedUp,
       transports: credential.transports || [],
+      display_name: displayName,
     });
 
     delete req.session.chatWebAuthnChallenge;

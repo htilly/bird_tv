@@ -251,6 +251,24 @@ function friendlyDate(iso) {
   } catch (_) { return iso; }
 }
 
+function relativeTime(iso) {
+  if (!iso) return 'Never';
+  try {
+    const d = new Date(iso + 'Z');
+    const now = new Date();
+    const diffMs = now - d;
+    const diffSec = Math.floor(diffMs / 1000);
+    const diffMin = Math.floor(diffSec / 60);
+    const diffHour = Math.floor(diffMin / 60);
+    const diffDay = Math.floor(diffHour / 24);
+    if (diffSec < 60) return 'Just now';
+    if (diffMin < 60) return `${diffMin} min ago`;
+    if (diffHour < 24) return `${diffHour}h ago`;
+    if (diffDay < 7) return `${diffDay}d ago`;
+    return friendlyDate(iso);
+  } catch (_) { return iso; }
+}
+
 // --- Simple CSRF using session-bound tokens ---
 function getCsrfToken(req) {
   if (!req.session._csrf) req.session._csrf = crypto.randomBytes(32).toString('hex');
@@ -1293,15 +1311,23 @@ router.get('/users/:id/edit', requireLogin, (req, res) => {
   if (!u) return res.redirect('/admin/users');
   const isSelf = req.session.userId === id;
   const credentials = db.getWebAuthnCredentialsByUserId(id);
+  const csrf = getCsrfToken(req);
 
   let credentialsHtml = '';
   if (credentials.length > 0) {
     const rows = credentials.map(cred => `
-      <tr>
-        <td><strong>${escapeHtml(cred.display_name || 'Security Key')}</strong></td>
+      <tr data-cred-id="${escapeHtml(cred.id)}">
+        <td class="cred-name-cell">
+          <span class="cred-name-display">${escapeHtml(cred.display_name || 'Security Key')}</span>
+          <input type="text" class="cred-name-input" value="${escapeHtml(cred.display_name || '')}" placeholder="e.g. YubiKey 5 NFC" maxlength="50" style="display:none;">
+          <button type="button" class="btn btn-small btn-ghost cred-rename-btn" title="Rename">✏️</button>
+          <button type="button" class="btn btn-small cred-save-btn" style="display:none;">Save</button>
+          <button type="button" class="btn btn-small btn-ghost cred-cancel-btn" style="display:none;">Cancel</button>
+        </td>
         <td style="font-family:monospace;font-size:0.85rem;color:#718096;">${cred.id.slice(0, 12)}...</td>
         <td>${cred.device_type === 'multiDevice' ? 'Synced' : 'Single device'}</td>
-        <td>${cred.created_at ? new Date(cred.created_at).toLocaleDateString() : 'N/A'}</td>
+        <td title="${cred.last_used_at ? 'Last used: ' + relativeTime(cred.last_used_at) : 'Never used'}">${relativeTime(cred.last_used_at)}</td>
+        <td>${cred.created_at ? friendlyDate(cred.created_at) : 'N/A'}</td>
         <td>
           <form method="post" action="/admin/webauthn/${encodeURIComponent(cred.id)}/delete" style="display:inline" data-confirm="Remove this security key?">
             ${csrfField(req)}
@@ -1313,9 +1339,54 @@ router.get('/users/:id/edit', requireLogin, (req, res) => {
     credentialsHtml = `
       <h2 style="margin-top:2rem;">Security Keys</h2>
       <table class="admin-table">
-        <thead><tr><th>Name</th><th>ID</th><th>Type</th><th>Added</th><th>Actions</th></tr></thead>
+        <thead><tr><th>Name</th><th>ID</th><th>Type</th><th>Last used</th><th>Added</th><th>Actions</th></tr></thead>
         <tbody>${rows}</tbody>
-      </table>`;
+      </table>
+      <script>
+        (function() {
+          document.querySelectorAll('.cred-rename-btn').forEach(btn => {
+            btn.addEventListener('click', function() {
+              const row = this.closest('tr');
+              row.querySelector('.cred-name-display').style.display = 'none';
+              row.querySelector('.cred-name-input').style.display = 'inline';
+              row.querySelector('.cred-rename-btn').style.display = 'none';
+              row.querySelector('.cred-save-btn').style.display = 'inline';
+              row.querySelector('.cred-cancel-btn').style.display = 'inline';
+              row.querySelector('.cred-name-input').focus();
+            });
+          });
+          document.querySelectorAll('.cred-cancel-btn').forEach(btn => {
+            btn.addEventListener('click', function() {
+              const row = this.closest('tr');
+              row.querySelector('.cred-name-display').style.display = 'inline';
+              row.querySelector('.cred-name-input').style.display = 'none';
+              row.querySelector('.cred-rename-btn').style.display = 'inline';
+              row.querySelector('.cred-save-btn').style.display = 'none';
+              row.querySelector('.cred-cancel-btn').style.display = 'none';
+            });
+          });
+          document.querySelectorAll('.cred-save-btn').forEach(btn => {
+            btn.addEventListener('click', async function() {
+              const row = this.closest('tr');
+              const credId = row.dataset.credId;
+              const newName = row.querySelector('.cred-name-input').value.trim() || 'Security Key';
+              const res = await fetch('/admin/webauthn/' + encodeURIComponent(credId) + '/rename', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ displayName: newName, _csrf: '${csrf}' })
+              });
+              if (res.ok) {
+                row.querySelector('.cred-name-display').textContent = newName;
+                row.querySelector('.cred-name-display').style.display = 'inline';
+                row.querySelector('.cred-name-input').style.display = 'none';
+                row.querySelector('.cred-rename-btn').style.display = 'inline';
+                row.querySelector('.cred-save-btn').style.display = 'none';
+                row.querySelector('.cred-cancel-btn').style.display = 'none';
+              }
+            });
+          });
+        })();
+      </script>`;
   } else {
     credentialsHtml = `
       <h2 style="margin-top:2rem;">Security Keys</h2>
@@ -2559,6 +2630,25 @@ router.post('/webauthn/login-verify', async (req, res) => {
     console.error('[webauthn] Authentication verification error:', err);
     res.status(400).json({ error: err.message || 'Authentication verification failed' });
   }
+});
+
+// POST /admin/webauthn/:credId/rename - Rename a credential (requires login)
+router.post('/webauthn/:credId/rename', requireLogin, verifyCsrf, auditLog('webauthn.rename'), (req, res) => {
+  const { credId } = req.params;
+  const { displayName } = req.body;
+  const credential = db.getWebAuthnCredentialById(credId);
+
+  if (!credential) {
+    return res.status(404).json({ error: 'Credential not found' });
+  }
+
+  if (credential.user_id !== req.session.userId) {
+    return res.status(403).json({ error: 'Not authorized' });
+  }
+
+  const name = String(displayName || '').trim().slice(0, 50);
+  db.updateWebAuthnCredentialDisplayName(credId, name);
+  res.json({ success: true, displayName: name });
 });
 
 // POST /admin/webauthn/:credId/delete - Delete a credential (requires login)
