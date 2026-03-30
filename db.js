@@ -698,8 +698,6 @@ function updateCamera(id, display_name, host, port, urlPath, username, password,
   const motionBlurKernel = motionSettings?.blur_kernel ?? cam.motion_blur_kernel;
   const motionCooldown = motionSettings?.cooldown_sec ?? cam.motion_cooldown_sec;
   
-  console.log('[db.updateCamera] Saving motion settings:', { motionMinArea, motionThreshold, motionBlurKernel, motionCooldown });
-  
   if (ffmpegOptionsJson !== null && ffmpegOptionsJson !== undefined) {
     const opts = typeof ffmpegOptionsJson === 'string' ? ffmpegOptionsJson : JSON.stringify(ffmpegOptionsJson || {});
     d.prepare(
