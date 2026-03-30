@@ -937,12 +937,14 @@ router.post('/cameras/:id', requireLogin, verifyCsrf, auditLog('camera.update'),
   const timeSyncInterval = Math.min(168, Math.max(1, parseInt(time_sync_interval_hours) || 24));
   
   const { motion_min_area, motion_threshold, motion_blur_kernel, motion_cooldown_sec } = req.body || {};
+  console.log('[camera.update] Motion settings received:', { motion_min_area, motion_threshold, motion_blur_kernel, motion_cooldown_sec });
   const motionSettings = {
     min_area: motion_min_area ? Math.max(100, Math.min(50000, parseInt(motion_min_area))) : null,
     threshold: motion_threshold ? Math.max(0.001, Math.min(1, parseFloat(motion_threshold))) : null,
     blur_kernel: motion_blur_kernel ? Math.max(3, Math.min(51, parseInt(motion_blur_kernel))) : null,
     cooldown_sec: motion_cooldown_sec ? Math.max(1, Math.min(300, parseInt(motion_cooldown_sec))) : null,
   };
+  console.log('[camera.update] Motion settings parsed:', motionSettings);
   
   try {
     db.updateCamera(
